@@ -1,0 +1,178 @@
+:root {
+  --bg: #11151c;
+  --panel: #1b212c;
+  --panel-2: #232b39;
+  --border: #2f3a4d;
+  --text: #e6e9ef;
+  --muted: #8b96a8;
+  --accent: #e8b923;
+  --green: #2e9e3f;
+  --red: #c0392b;
+  --blue: #3b6cc4;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', Roboto, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+
+.container { max-width: 1080px; margin: 0 auto; padding: 20px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+h1 { font-size: 1.6rem; margin-bottom: 4px; }
+h2 { font-size: 1.2rem; margin-bottom: 12px; }
+h3 { font-size: 1rem; margin-bottom: 8px; }
+.muted { color: var(--muted); font-size: 0.9rem; }
+
+button, .btn {
+  background: var(--accent);
+  color: #1a1a1a;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 16px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-red { background: var(--red); color: #fff; }
+.btn-green { background: var(--green); color: #fff; }
+.btn-blue { background: var(--blue); color: #fff; }
+.btn-ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+
+input, select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 9px 11px;
+  font-size: 0.95rem;
+  width: 100%;
+}
+
+label { display: block; font-size: 0.85rem; color: var(--muted); margin: 10px 0 4px; }
+
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row > * { flex: 1; }
+
+.grid { display: grid; gap: 12px; }
+.grid-2 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.grid-3 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+
+.stat {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+}
+.stat .value { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+.stat .label { font-size: 0.8rem; color: var(--muted); }
+
+.bar {
+  background: var(--panel-2);
+  border-radius: 6px;
+  height: 18px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.bar > div { height: 100%; transition: width 0.3s; }
+
+.nav {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+}
+.nav-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-height: 56px;
+}
+.nav .brand { font-weight: 800; font-size: 1.15rem; color: var(--accent); margin-right: 14px; }
+.nav a {
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.92rem;
+}
+.nav a.router-link-exact-active { background: var(--panel-2); color: var(--accent); }
+.nav .spacer { flex: 1; }
+
+.toast {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 0.92rem;
+}
+.toast.ok { background: rgba(46,158,63,0.15); border: 1px solid var(--green); }
+.toast.err { background: rgba(192,57,43,0.15); border: 1px solid var(--red); }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-size: 0.82rem; text-transform: uppercase; }
+
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.auth-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.auth-card { width: 100%; max-width: 380px; }
+
+/* ---- Responsivo / mobile ---- */
+
+/* Respeita o "notch" quando instalado como app (display: standalone). */
+.nav { padding-left: max(20px, env(safe-area-inset-left));
+       padding-right: max(20px, env(safe-area-inset-right)); }
+
+@media (max-width: 720px) {
+  .container { padding: 14px; }
+  .nav { padding-left: max(14px, env(safe-area-inset-left));
+         padding-right: max(14px, env(safe-area-inset-right)); }
+  .panel { padding: 14px; }
+  h1 { font-size: 1.35rem; }
+  h2 { font-size: 1.1rem; }
+  .stat .value { font-size: 1.2rem; }
+  .stat { padding: 10px; }
+
+  /* Tabelas largas rolam na horizontal dentro do painel em vez de quebrar. */
+  .panel { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  th, td { padding: 8px 8px; white-space: nowrap; }
+
+  /* Botões maiores e mais fáceis de tocar. */
+  button, .btn { padding: 11px 16px; }
+}
+
+/* Em telas muito estreitas, controles de formulário ocupam a linha inteira. */
+@media (max-width: 460px) {
+  .row > * { flex-basis: 100%; }
+}

@@ -1,0 +1,119 @@
+import { ResourceType } from '../entities/enums';
+
+export type ResourceTier = 'RARO' | 'COMUM';
+
+export interface ResourceInfo {
+  key: ResourceType;
+  label: string;
+  tier: ResourceTier;
+  /** Quanto maior, mais raro. Usado para ordenar e equilibrar a distribuicao. */
+  rarityRank: number;
+  color: string;
+  icon: string;
+  /** Efeito no jogo (parte ainda sera implementada futuramente). */
+  effect: string;
+}
+
+/**
+ * Catalogo de recursos especiais.
+ * Ordem de raridade (do mais raro ao menos raro entre os raros):
+ * Niobio > Uranio > Prata > Ouro > Petroleo.
+ */
+export const RESOURCES: Record<ResourceType, ResourceInfo> = {
+  [ResourceType.NIOBIO]: {
+    key: ResourceType.NIOBIO,
+    label: 'Nióbio',
+    tier: 'RARO',
+    rarityRank: 100,
+    color: '#9b59b6',
+    icon: '💜',
+    effect:
+      'Liga estratégica para armamento de elite. Recurso extremamente raro.',
+  },
+  [ResourceType.URANIO]: {
+    key: ResourceType.URANIO,
+    label: 'Urânio',
+    tier: 'RARO',
+    rarityRank: 80,
+    color: '#27ae60',
+    icon: '☢️',
+    effect: 'Necessário para armas avançadas e energia. Recurso muito raro.',
+  },
+  [ResourceType.PRATA]: {
+    key: ResourceType.PRATA,
+    label: 'Prata',
+    tier: 'RARO',
+    rarityRank: 60,
+    color: '#bdc3c7',
+    icon: '🥈',
+    effect: 'Metal precioso com bom valor de exportação.',
+  },
+  [ResourceType.OURO]: {
+    key: ResourceType.OURO,
+    label: 'Ouro',
+    tier: 'RARO',
+    rarityRank: 55,
+    color: '#f1c40f',
+    icon: '🥇',
+    effect: 'Metal precioso de altíssimo valor de exportação.',
+  },
+  [ResourceType.PETROLEO]: {
+    key: ResourceType.PETROLEO,
+    label: 'Petróleo',
+    tier: 'RARO',
+    rarityRank: 40,
+    color: '#34404f',
+    icon: '🛢️',
+    effect:
+      'Combustível para a máquina de guerra. O menos raro entre os recursos raros.',
+  },
+  [ResourceType.MADEIRA]: {
+    key: ResourceType.MADEIRA,
+    label: 'Madeira',
+    tier: 'COMUM',
+    rarityRank: 20,
+    color: '#8e6e3a',
+    icon: '🪵',
+    effect: 'Matéria-prima básica para construção.',
+  },
+  [ResourceType.FERRO]: {
+    key: ResourceType.FERRO,
+    label: 'Ferro',
+    tier: 'COMUM',
+    rarityRank: 18,
+    color: '#7f8c8d',
+    icon: '⛓️',
+    effect: 'Matéria-prima essencial para a produção de armas.',
+  },
+  [ResourceType.BAUXITA]: {
+    key: ResourceType.BAUXITA,
+    label: 'Bauxita',
+    tier: 'COMUM',
+    rarityRank: 16,
+    color: '#c0673a',
+    icon: '🪨',
+    effect: 'Minério usado na produção de alumínio.',
+  },
+  [ResourceType.COBRE]: {
+    key: ResourceType.COBRE,
+    label: 'Cobre',
+    tier: 'COMUM',
+    rarityRank: 14,
+    color: '#d35400',
+    icon: '🟠',
+    effect: 'Metal usado em munição e componentes eletrônicos.',
+  },
+  [ResourceType.TERRAS_AGRICOLAS]: {
+    key: ResourceType.TERRAS_AGRICOLAS,
+    label: 'Terras Agrícolas',
+    tier: 'COMUM',
+    rarityRank: 12,
+    color: '#27843a',
+    icon: '🌾',
+    effect: 'Solo fértil que concede bônus de produção de comida.',
+  },
+};
+
+export function resourceInfo(key: ResourceType): ResourceInfo {
+  return RESOURCES[key];
+}

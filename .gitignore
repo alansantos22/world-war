@@ -1,0 +1,15 @@
+# Credenciais — NUNCA versionar
+CREDENTIALS.md
+
+# Variáveis de ambiente
+.env
+**/.env
+
+# Dependências e builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Logs e temporários
+*.log

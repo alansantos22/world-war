@@ -1,0 +1,20 @@
+{
+  "name": "World War",
+  "short_name": "World War",
+  "description": "Jogo de estratégia de guerra geopolítica no estilo e-sim.",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#11151c",
+  "theme_color": "#11151c",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
