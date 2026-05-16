@@ -11,5 +11,9 @@ node_modules/
 dist/
 **/dist/
 
+# Build do Rust/Tauri (jogo desktop)
+**/target/
+**/gen/schemas/
+
 # Logs e temporários
 *.log

@@ -1,0 +1,17 @@
+{
+  "name": "world-war",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo World War — jogo online (estilo e-sim) e jogo desktop de grande estratégia",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev:backend": "npm run start:dev -w apps/backend",
+    "dev:frontend": "npm run dev -w apps/frontend",
+    "dev:desktop": "npm run tauri:dev -w apps/desktop",
+    "seed": "npm run seed -w apps/backend"
+  }
+}
