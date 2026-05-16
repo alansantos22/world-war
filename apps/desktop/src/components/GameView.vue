@@ -289,15 +289,12 @@ const playerCapital = computed(() =>
   ),
 );
 
-// Províncias que exibem o ícone do recurso: raros sempre; no modo Recursos,
-// todos. Capitais não mostram (já têm a estrela ★).
+// Províncias que exibem o ícone do recurso: só no modo Recursos. No modo
+// Político o mapa fica limpo. Capitais nunca mostram (já têm a estrela ★).
 const iconProvinces = computed(() =>
-  provinces.value.filter(
-    (p) =>
-      !p.isCapital &&
-      (mode.value === "resource" ||
-        resourceInfo(p.resource).tier === "RARO"),
-  ),
+  mode.value === "resource"
+    ? provinces.value.filter((p) => !p.isCapital)
+    : [],
 );
 
 const selectedOwner = computed(() =>

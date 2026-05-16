@@ -73,9 +73,9 @@ colocado o mais longe possível dos raros já posicionados), garantindo que
 ninguém monopolize um recurso num canto do mapa. Quantidades proporcionais ao
 total de províncias — Nióbio é o mais escasso (~3%).
 
-O **ícone do recurso** aparece sobre a província no mapa: os recursos **raros
-são sempre visíveis** (facilita achar petróleo, urânio, etc.); no modo
-**Recursos**, todas as províncias mostram o ícone.
+O **ícone do recurso** aparece sobre a província **apenas no modo Recursos**
+— aí todas as províncias mostram o seu ícone. No modo **Político** o mapa
+fica limpo, sem ícones de recurso (nem dos raros).
 
 > **Planejado:** efeito dos recursos na economia/produção de cada nação.
 
@@ -314,8 +314,10 @@ deixando o mapa livre.
   (Político / Recursos); à direita, a província sob o cursor e o nome da
   partida. Não traz o nome do jogo (já aparece no menu inicial).
 - **Barra lateral** (canto superior esquerdo) — uma lista vertical de botões
-  arredondados com as ações do jogo: **Nações** e **Direcionamentos** (abrem
-  os painéis), **Novo mapa**, **Salvar jogo**, **Menu** e **Tela cheia**.
+  arredondados, **só com ícones**, para as ações do jogo: **Nações** (🏴) e
+  **Direcionamentos** (🎖️), que abrem os painéis, e **Novo mapa** (↻),
+  **Salvar jogo** (💾), **Menu** (⏏) e **Tela cheia** (⛶). O texto de cada
+  ação aparece como dica ao passar o mouse.
 - **Painel da província** — aparece ao **clicar numa província**; mostra dono,
   direcionamento, recurso e a **produção por turno** (manpower, recurso local,
   produção e pesquisa). Fecha no `✕` ou ao clicar no oceano.
@@ -326,6 +328,11 @@ deixando o mapa livre.
 - **Navegação do mapa** — a roda do mouse dá **zoom** (centrado no cursor) e
   **arrastar** move o mapa. Não há botões de zoom: a navegação é toda pelo
   mouse, deixando o rodapé livre.
+- **Borda de oceano** — o mundo é renderizado com uma **margem de água** em
+  volta dos continentes (`MAP_PAD` em [`GameView.vue`](src/components/GameView.vue)).
+  Essa folga empurra a terra para longe dos cantos da tela — então a barra
+  superior e a barra lateral ficam **sobre o mar** — e dá espaço para arrastar
+  o mapa e tirar qualquer província de trás de um painel.
 
 Regra de ouro: nenhum painel fica na frente do mapa sem o jogador ter pedido.
 
