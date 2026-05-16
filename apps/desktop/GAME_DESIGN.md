@@ -71,6 +71,10 @@ colocado o mais longe possível dos raros já posicionados), garantindo que
 ninguém monopolize um recurso num canto do mapa. Quantidades proporcionais ao
 total de províncias — Nióbio é o mais escasso (~3%).
 
+O **ícone do recurso** aparece sobre a província no mapa: os recursos **raros
+são sempre visíveis** (facilita achar petróleo, urânio, etc.); no modo
+**Recursos**, todas as províncias mostram o ícone.
+
 > **Planejado:** efeito dos recursos na economia/produção de cada nação.
 
 ---
@@ -146,7 +150,32 @@ banco. "Novo mapa" apaga e regenera.
 
 ---
 
-## 6. Estrutura do código
+## 6. Interface (HUD)
+
+A interface segue o estilo dos jogos de grande estratégia (Europa Universalis,
+Hearts of Iron): o **mapa ocupa a tela inteira** como fundo e a HUD são
+**painéis sobrepostos** que **abrem por botão** — por padrão ficam fechados,
+deixando o mapa livre.
+
+- **Janela** — abre **maximizada**; o botão `⛶` na barra superior alterna a
+  **tela cheia** de verdade.
+- **Barra superior** — brasão/título, alternância de visão (Político /
+  Recursos), os botões que abrem os painéis, a província sob o cursor e os
+  controles ("Novo mapa", tela cheia).
+- **Painel da província** (canto inferior esquerdo) — aparece ao **clicar numa
+  província**; mostra dono, direcionamento e recurso. Fecha no `✕` ou ao
+  clicar no oceano.
+- **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
+  territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
+  fica aberto por vez; o botão acende quando ativo.
+
+- **Navegação do mapa** — a roda do mouse dá **zoom** (centrado no cursor) e
+  **arrastar** move o mapa. Os botões `＋` / `−` / `⤢` no rodapé controlam o
+  zoom (`⤢` volta à visão geral).
+
+Regra de ouro: nenhum painel fica na frente do mapa sem o jogador ter pedido.
+
+## 7. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -163,7 +192,7 @@ apps/desktop/src/
 
 ---
 
-## 7. Roteiro (próximos passos)
+## 8. Roteiro (próximos passos)
 
 1. **Escolher nação** — tela inicial "Novo jogo" para o jogador picar a facção.
 2. **Turnos** — botão "Próximo turno" que avança o tempo.
