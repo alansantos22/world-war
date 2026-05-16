@@ -59,6 +59,25 @@ import {
   type TroopKind,
 } from "../game/squads";
 import {
+  loadCities,
+  loadSettlerSquads,
+  foundCity,
+  moveSettlerSquad,
+  deleteSettlerSquad,
+  canFoundCity,
+  canSettlerSquadMove,
+  isSettlerSquadReady,
+  cityInfluenceTiles,
+  cityStorage,
+  cityInfluence,
+  cityFoodProduction,
+  cityFoodConsumption,
+  COLONO_COST,
+  MIN_CITY_DISTANCE,
+  type City,
+  type SettlerSquad,
+} from "../game/cities";
+import {
   battleModifiers,
   moralForceDelta,
   defenderTroopCount,
@@ -97,8 +116,14 @@ const busySquad = ref(false);
 // ===== Recrutamento =====
 /** Ordens de recrutamento (fila de produção das cidades). */
 const recruitOrders = ref<RecruitOrder[]>([]);
-/** `true` quando o painel da província mostra o recrutamento, não a info. */
-const recruitOpen = ref(false);
+
+// ===== Cidades e colonos =====
+/** Cidades da partida (capitais e cidades fundadas). */
+const cities = ref<City[]>([]);
+/** Esquadrões de colonos no mapa. */
+const settlerSquads = ref<SettlerSquad[]>([]);
+/** Esquadrão de colonos em modo de movimento (aguarda o clique no destino). */
+const settlerMoveMode = ref<SettlerSquad | null>(null);
 
 // ===== Cidade (inventário de tropas) =====
 /** Tropas guardadas no inventário das cidades. */
@@ -106,7 +131,7 @@ const cityTroops = ref<CityTroop[]>([]);
 /** `true` enquanto o painel "Ver cidade" (direita) está aberto. */
 const cityPanelOpen = ref(false);
 /** Aba ativa do painel da cidade. */
-const cityTab = ref<"inventory">("inventory");
+const cityTab = ref<"city" | "production" | "inventory">("city");
 /** Ids das tropas do inventário marcadas para mover. */
 const pickedCityTroops = ref<number[]>([]);
 /** Tropas aguardando a escolha de esquadrão ("Qual esquadrão?"). */
@@ -298,7 +323,15 @@ function onProvinceClick(p: Province) {
     }
     moveMode.value = null;
   }
-  recruitOpen.value = false;
+  // Idem para o esquadrão de colonos em movimento.
+  if (settlerMoveMode.value) {
+    const ss = settlerMoveMode.value;
+    if (settlerMoveTargets.value.some((t) => t.id === p.id)) {
+      void doMoveSettler(ss, p);
+      return;
+    }
+    settlerMoveMode.value = null;
+  }
   showTake.value = false;
   cityPanelOpen.value = false;
   selected.value = p;
@@ -306,7 +339,7 @@ function onProvinceClick(p: Province) {
 function onOceanClick() {
   if (panMoved.value) return;
   moveMode.value = null;
-  recruitOpen.value = false;
+  settlerMoveMode.value = null;
   showTake.value = false;
   cityPanelOpen.value = false;
   selected.value = null;
@@ -327,6 +360,8 @@ async function load() {
     squads.value = await loadSquads(props.saveId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
     cityTroops.value = await loadCityTroops(props.saveId);
+    cities.value = await loadCities(props.saveId);
+    settlerSquads.value = await loadSettlerSquads(props.saveId);
     battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -335,12 +370,22 @@ async function load() {
   }
 }
 
+/** Recarrega os estados que mudam com ações e turnos (sem tocar no mapa). */
+async function reloadState() {
+  squads.value = await loadSquads(props.saveId);
+  settlerSquads.value = await loadSettlerSquads(props.saveId);
+  recruitOrders.value = await loadRecruitOrders(props.saveId);
+  cityTroops.value = await loadCityTroops(props.saveId);
+  cities.value = await loadCities(props.saveId);
+  factions.value = await loadFactions(props.saveId);
+}
+
 async function newMap() {
   busy.value = true;
   err.value = "";
   selected.value = null;
   moveMode.value = null;
-  recruitOpen.value = false;
+  settlerMoveMode.value = null;
   showTake.value = false;
   showArmy.value = false;
   cityPanelOpen.value = false;
@@ -348,9 +393,7 @@ async function newMap() {
   moveTroopId.value = null;
   try {
     provinces.value = await regenerateMap(props.saveId);
-    squads.value = await loadSquads(props.saveId);
-    recruitOrders.value = await loadRecruitOrders(props.saveId);
-    cityTroops.value = await loadCityTroops(props.saveId);
+    await reloadState();
     battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -366,10 +409,8 @@ async function nextTurn() {
   try {
     const res = await advanceTurn(props.saveId);
     turn.value = res.turn;
+    await reloadState();
     factions.value = res.factions;
-    squads.value = await loadSquads(props.saveId);
-    recruitOrders.value = await loadRecruitOrders(props.saveId);
-    cityTroops.value = await loadCityTroops(props.saveId);
     flashToast(`Turno ${res.turn} — ${formatTurnDate(res.turn)}`);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -486,6 +527,8 @@ async function doMove(s: Squad, dest: Province) {
   try {
     await moveSquad(s.id, dest.x, dest.y, turn.value);
     squads.value = await loadSquads(props.saveId);
+    // Um esquadrão militar destrói esquadrões de colonos inimigos no destino.
+    settlerSquads.value = await loadSettlerSquads(props.saveId);
     selected.value = dest;
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -495,25 +538,31 @@ async function doMove(s: Squad, dest: Province) {
   }
 }
 
-// ===== Recrutamento de tropas =====
+// ===== Cidades, recrutamento e colonos =====
 
 /** Mapa de células → província, para consultar o terreno de um esquadrão. */
 const provinceByTile = computed(
   () => new Map(provinces.value.map((p) => [`${p.x},${p.y}`, p])),
 );
 
-/** `true` se o esquadrão está sobre um tile gelado (move-se a cada 2 turnos). */
+/** Mapa de células → cidade. */
+const cityByTile = computed(
+  () => new Map(cities.value.map((c) => [`${c.x},${c.y}`, c])),
+);
+
+/** `true` se o tile é gelado (esquadrões saem dele a cada 2 turnos). */
+function isTileGlacial(x: number, y: number): boolean {
+  return provinceByTile.value.get(`${x},${y}`)?.climate === ClimateZone.GELADO;
+}
+
+/** `true` se o esquadrão está sobre um tile gelado. */
 function isSquadOnGlacial(s: Squad): boolean {
-  return (
-    provinceByTile.value.get(`${s.x},${s.y}`)?.climate === ClimateZone.GELADO
-  );
+  return isTileGlacial(s.x, s.y);
 }
 
 /** `true` se o esquadrão está num tile da própria facção (manutenção pela metade). */
 function isSquadOnOwnTile(s: Squad): boolean {
-  return (
-    provinceByTile.value.get(`${s.x},${s.y}`)?.ownerCode === s.ownerCode
-  );
+  return provinceByTile.value.get(`${s.x},${s.y}`)?.ownerCode === s.ownerCode;
 }
 
 /** Esquadrões do jogador na província selecionada. */
@@ -521,14 +570,21 @@ const playerSquadsHere = computed<Squad[]>(() =>
   squadsOnSelected.value.filter((s) => s.ownerCode === game.value?.playerCode),
 );
 
-/** `true` se dá para recrutar na província selecionada (uma cidade sua). */
-const canRecruitHere = computed(
-  () =>
-    !!selected.value &&
-    selected.value.ownerCode === game.value?.playerCode,
+/** Cidade no tile selecionado, se houver. */
+const selectedCity = computed<City | null>(() =>
+  selected.value
+    ? cityByTile.value.get(`${selected.value.x},${selected.value.y}`) ?? null
+    : null,
 );
 
-/** Ordens de recrutamento na fila da província selecionada. */
+/** `true` se o tile selecionado é uma cidade do jogador. */
+const selectedIsPlayerCity = computed(
+  () =>
+    !!selectedCity.value &&
+    selectedCity.value.ownerCode === game.value?.playerCode,
+);
+
+/** Ordens de recrutamento na fila da cidade selecionada. */
 const recruitOrdersHere = computed<RecruitOrder[]>(() =>
   selected.value
     ? recruitOrders.value.filter(
@@ -544,17 +600,11 @@ function recruitEta(o: RecruitOrder): number {
   return Math.ceil((o.prodCost - o.prodDone) / prod);
 }
 
-/** Turnos para produzir uma tropa nova, do zero, nesta cidade. */
-function troopBuildTurns(kind: TroopKind): number {
+/** Turnos para construir, do zero, um item de dado custo de produção. */
+function buildTurns(prodCost: number): number {
   const prod = selected.value?.production ?? 0;
   if (prod <= 0) return Infinity;
-  return Math.ceil(TROOP_TYPES[kind].productionCost / prod);
-}
-
-/** Abre o painel de recrutamento da cidade selecionada. */
-function openRecruit() {
-  if (!canRecruitHere.value) return;
-  recruitOpen.value = true;
+  return Math.ceil(prodCost / prod);
 }
 
 /** Enfileira o recrutamento de uma tropa para o inventário da cidade. */
@@ -575,6 +625,24 @@ async function doRecruit(kind: TroopKind) {
   }
 }
 
+/** Enfileira a produção de um colono (pago com população e comida da cidade). */
+async function doRecruitColono() {
+  const p = selected.value;
+  if (!p || !p.ownerCode) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await queueRecruit(props.saveId, p.ownerCode, p.x, p.y, "COLONO");
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
+    cities.value = await loadCities(props.saveId);
+    flashToast("Colono adicionado à fila de produção.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
 /** Cancela uma ordem de recrutamento e devolve os recursos pagos. */
 async function doCancelRecruit(orderId: number) {
   busySquad.value = true;
@@ -582,6 +650,7 @@ async function doCancelRecruit(orderId: number) {
   try {
     await cancelRecruit(orderId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
+    cities.value = await loadCities(props.saveId);
     factions.value = await loadFactions(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -601,16 +670,151 @@ const cityTroopsHere = computed<CityTroop[]>(() =>
     : [],
 );
 
-/** Abre o painel "Ver cidade" da província selecionada. */
+/** Abre o painel "Ver cidade" da cidade selecionada. */
 function openCity() {
-  if (!selected.value || selected.value.ownerCode !== game.value?.playerCode) {
-    return;
-  }
+  if (!selectedIsPlayerCity.value) return;
   pickedCityTroops.value = [];
   askSquadFor.value = null;
-  cityTab.value = "inventory";
+  cityTab.value = "city";
   activePanel.value = null;
   cityPanelOpen.value = true;
+}
+
+// ===== Esquadrões de colonos =====
+
+/** Esquadrões de colonos do jogador no tile selecionado. */
+const settlerSquadsHere = computed<SettlerSquad[]>(() =>
+  selected.value
+    ? settlerSquads.value.filter(
+        (s) =>
+          s.x === selected.value!.x &&
+          s.y === selected.value!.y &&
+          s.ownerCode === game.value?.playerCode,
+      )
+    : [],
+);
+
+/** Cidades que não são capitais (capitais já são marcadas com ★ no mapa). */
+const nonCapitalCities = computed<City[]>(() =>
+  cities.value.filter((c) => !c.isCapital),
+);
+
+/** Tiles de terra na zona de influência da cidade selecionada. */
+const selectedInfluenceTiles = computed(() => {
+  const c = selectedCity.value;
+  if (!c) return [];
+  return cityInfluenceTiles(c).filter((t) =>
+    provinceByTile.value.has(`${t.x},${t.y}`),
+  );
+});
+
+/** Texto que resume o saldo de comida da cidade selecionada. */
+const cityFoodBalanceNote = computed(() => {
+  const c = selectedCity.value;
+  if (!c) return "";
+  const net = cityFoodProduction(c) - cityFoodConsumption(c.population);
+  if (net > 0) {
+    return `Excedente de ${net} de comida — a população cresce ~${net}% por turno.`;
+  }
+  if (net === 0) {
+    return "Produção e consumo de comida empatados — população estável.";
+  }
+  return `Faltam ${-net} de comida por turno; quando o estoque acabar, a cidade perde 3% da população por turno.`;
+});
+
+/** Esquadrões de colonos agrupados por tile — um marcador por célula. */
+const settlerTiles = computed(() => {
+  const m = new Map<
+    string,
+    { x: number; y: number; count: number; ownerCode: string }
+  >();
+  for (const s of settlerSquads.value) {
+    const k = `${s.x},${s.y}`;
+    const t = m.get(k);
+    if (t) t.count += s.count;
+    else m.set(k, { x: s.x, y: s.y, count: s.count, ownerCode: s.ownerCode });
+  }
+  return [...m.values()];
+});
+
+/** `true` se o esquadrão de colonos pode fundar uma cidade no seu tile. */
+function canFoundHere(s: SettlerSquad): boolean {
+  return (
+    isSettlerSquadReady(s, turn.value) &&
+    canFoundCity(s.x, s.y, cities.value)
+  );
+}
+
+/** Funda uma cidade a partir de um esquadrão de colonos. */
+async function doFoundCity(s: SettlerSquad) {
+  if (!canFoundHere(s)) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await foundCity(props.saveId, s, turn.value);
+    settlerMoveMode.value = null;
+    provinces.value = await loadMap(props.saveId);
+    await reloadState();
+    // Reaponta a seleção para a província recém-atualizada (dono mudou).
+    selected.value =
+      provinces.value.find((p) => p.x === s.x && p.y === s.y) ?? null;
+    flashToast("Cidade fundada!");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Dissolve um esquadrão de colonos do jogador. */
+async function removeSettlerSquad(s: SettlerSquad) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await deleteSettlerSquad(s.id);
+    if (settlerMoveMode.value?.id === s.id) settlerMoveMode.value = null;
+    settlerSquads.value = await loadSettlerSquads(props.saveId);
+    flashToast("Esquadrão de colonos dissolvido.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Entra no modo de movimento de um esquadrão de colonos. */
+function startSettlerMove(s: SettlerSquad) {
+  moveMode.value = null;
+  settlerMoveMode.value = settlerMoveMode.value?.id === s.id ? null : s;
+}
+
+/** Tiles vizinhos válidos para o esquadrão de colonos em movimento. */
+const settlerMoveTargets = computed<Province[]>(() => {
+  const m = settlerMoveMode.value;
+  if (!m) return [];
+  const code = game.value?.playerCode;
+  return provinces.value.filter(
+    (p) =>
+      isAdjacent(p, m) &&
+      (p.ownerCode == null || p.ownerCode === code) &&
+      !blockedTiles.value.has(`${p.x},${p.y}`),
+  );
+});
+
+/** Move um esquadrão de colonos para um tile vizinho. */
+async function doMoveSettler(s: SettlerSquad, dest: Province) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await moveSettlerSquad(s.id, dest.x, dest.y, turn.value);
+    settlerSquads.value = await loadSettlerSquads(props.saveId);
+    selected.value = dest;
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+    settlerMoveMode.value = null;
+  }
 }
 
 /**
@@ -1211,6 +1415,32 @@ function provinceFill(p: Province): string {
       >
         ★
       </text>
+      <!-- Zona de influência da cidade selecionada -->
+      <rect
+        v-for="t in selectedInfluenceTiles"
+        :key="'inf' + t.x + '-' + t.y"
+        :x="t.x"
+        :y="t.y"
+        width="1.02"
+        height="1.02"
+        fill="rgba(232,193,74,0.10)"
+        stroke="rgba(232,193,74,0.45)"
+        stroke-width="0.05"
+        style="pointer-events: none"
+      />
+      <!-- Marcadores de cidade (as capitais usam o ★) -->
+      <text
+        v-for="c in nonCapitalCities"
+        :key="'city' + c.id"
+        :x="c.x + 0.21"
+        :y="c.y + 0.27"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size="0.5"
+        style="pointer-events: none"
+      >
+        🏛️
+      </text>
       <!-- Destinos válidos do esquadrão em movimento -->
       <rect
         v-for="p in moveTargets"
@@ -1221,6 +1451,19 @@ function provinceFill(p: Province): string {
         height="1.02"
         fill="rgba(95,200,120,0.26)"
         stroke="#5fd07a"
+        stroke-width="0.12"
+        style="pointer-events: none"
+      />
+      <!-- Destinos válidos do esquadrão de colonos em movimento -->
+      <rect
+        v-for="p in settlerMoveTargets"
+        :key="'smt' + p.id"
+        :x="p.x"
+        :y="p.y"
+        width="1.02"
+        height="1.02"
+        fill="rgba(232,193,74,0.24)"
+        stroke="#e8c14a"
         stroke-width="0.12"
         style="pointer-events: none"
       />
@@ -1260,6 +1503,44 @@ function provinceFill(p: Province): string {
           paint-order="stroke"
         >
           {{ t.squads.length }}
+        </text>
+      </g>
+      <!-- Marcadores dos esquadrões de colonos -->
+      <g
+        v-for="t in settlerTiles"
+        :key="'st' + t.x + '-' + t.y"
+        style="pointer-events: none"
+      >
+        <circle
+          :cx="t.x + 0.5"
+          :cy="t.y + 0.72"
+          r="0.3"
+          :fill="nationOf(t.ownerCode)?.color ?? '#dfe3ea'"
+          stroke="#0c0f16"
+          stroke-width="0.07"
+        />
+        <text
+          :x="t.x + 0.5"
+          :y="t.y + 0.74"
+          text-anchor="middle"
+          dominant-baseline="central"
+          font-size="0.34"
+        >
+          👷
+        </text>
+        <text
+          v-if="t.count > 1"
+          :x="t.x + 0.82"
+          :y="t.y + 0.5"
+          text-anchor="middle"
+          dominant-baseline="central"
+          font-size="0.36"
+          fill="#fff"
+          stroke="#000"
+          stroke-width="0.08"
+          paint-order="stroke"
+        >
+          {{ t.count }}
         </text>
       </g>
     </svg>
@@ -1412,8 +1693,6 @@ function provinceFill(p: Province): string {
       <!-- Painel da província (contextual, ao clicar) -->
       <Transition name="rise">
         <section v-if="selected" class="card province">
-          <!-- ===== Vista: informações do território ===== -->
-          <template v-if="!recruitOpen">
           <div class="card-head">
             <div class="head-title">
               <span class="prov-name">{{ selected.name }}</span>
@@ -1680,8 +1959,87 @@ function provinceFill(p: Province): string {
             </p>
           </div>
 
-          <!-- Ações da cidade do jogador: montar esquadrão e recrutar -->
-          <template v-if="selected.ownerCode === game?.playerCode">
+          <!-- Esquadrões de colonos neste tile -->
+          <template v-if="settlerSquadsHere.length > 0">
+            <div class="squad-head">
+              <span>👷 Colonos aqui</span>
+              <span class="squad-count">{{ settlerSquadsHere.length }}</span>
+            </div>
+            <div
+              v-for="s in settlerSquadsHere"
+              :key="'set' + s.id"
+              class="squad-row"
+              :style="{ '--sc': playerNation?.color ?? NEUTRAL_COLOR }"
+            >
+              <span class="squad-bar"></span>
+              <div class="squad-body">
+                <div class="squad-title">
+                  <span>👷 Esquadrão de colonos</span>
+                  <span class="squad-stars" title="Colonos no esquadrão">
+                    ×{{ s.count }}
+                  </span>
+                  <span
+                    class="squad-state"
+                    :class="isSettlerSquadReady(s, turn) ? 'ready' : 'prep'"
+                  >
+                    {{ isSettlerSquadReady(s, turn) ? "Pronto" : "Em preparação" }}
+                  </span>
+                </div>
+                <div class="squad-stats">
+                  <span title="População da cidade fundada">
+                    👥 {{ fmt(s.count * 100000) }} hab.
+                  </span>
+                  <span title="Comida inicial da cidade fundada">
+                    🌾 {{ s.count * 10 }}
+                  </span>
+                </div>
+                <div class="squad-acts">
+                  <button
+                    class="sbtn"
+                    :class="{ on: settlerMoveMode?.id === s.id }"
+                    :disabled="
+                      busySquad ||
+                      !canSettlerSquadMove(s, turn, isTileGlacial(s.x, s.y))
+                    "
+                    :title="
+                      !isSettlerSquadReady(s, turn)
+                        ? 'Em preparação — pronto no próximo turno'
+                        : 'Mover o esquadrão de colonos'
+                    "
+                    @click="startSettlerMove(s)"
+                  >
+                    ➤ Mover
+                  </button>
+                  <button
+                    class="sbtn ok"
+                    :disabled="busySquad || !canFoundHere(s)"
+                    :title="
+                      !isSettlerSquadReady(s, turn)
+                        ? 'Em preparação — pronto no próximo turno'
+                        : !canFoundCity(s.x, s.y, cities)
+                          ? 'Há uma cidade a menos de ' +
+                            MIN_CITY_DISTANCE +
+                            ' tiles daqui'
+                          : 'Fundar uma cidade neste tile'
+                    "
+                    @click="doFoundCity(s)"
+                  >
+                    🏛️ Fundar cidade
+                  </button>
+                  <button
+                    class="sbtn danger"
+                    :disabled="busySquad"
+                    @click="removeSettlerSquad(s)"
+                  >
+                    ✕ Excluir
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Ações da cidade do jogador -->
+          <template v-if="selectedIsPlayerCity">
             <button
               class="squad-create"
               :disabled="
@@ -1704,17 +2062,9 @@ function provinceFill(p: Province): string {
               Recursos insuficientes para montar um esquadrão.
             </p>
             <button
-              class="squad-recruit"
-              :disabled="busySquad"
-              title="Recrutar tropas para o inventário da cidade"
-              @click="openRecruit"
-            >
-              🪖 Recrutamento
-            </button>
-            <button
               class="squad-city"
               :disabled="busySquad"
-              title="Abrir o painel da cidade (inventário de tropas)"
+              title="Abrir o painel da cidade (cidade, produção e inventário)"
               @click="openCity"
             >
               🏛️ Ver cidade
@@ -1822,140 +2172,6 @@ function provinceFill(p: Province): string {
           >
             🚩 Tomar território
           </button>
-          </template>
-
-          <!-- ===== Vista: recrutamento de tropas ===== -->
-          <template v-else>
-            <div class="card-head">
-              <button
-                class="x back"
-                title="Voltar às informações do território"
-                @click="recruitOpen = false"
-              >
-                ‹
-              </button>
-              <div class="head-title">🪖 Recrutamento</div>
-              <button class="x" @click="selected = null">✕</button>
-            </div>
-            <p class="sub">
-              {{ selected.name }}
-              <span class="dimsep">·</span>
-              produção {{ selected.production }}/turno
-            </p>
-
-            <p class="rc-pad rc-note">
-              As tropas recrutadas vão para o <strong>inventário</strong> desta
-              cidade. Use <strong>Ver cidade</strong> para enviá-las a um
-              esquadrão.
-            </p>
-
-            <!-- Tropas disponíveis para recrutamento -->
-            <div class="rc-block">
-              <div class="rc-label">Tropas disponíveis</div>
-              <div class="rc-troop">
-                <span class="rc-troop-icon">
-                  {{ TROOP_TYPES.INFANTARIA.icon }}
-                </span>
-                <div class="rc-troop-info">
-                  <div class="rc-troop-name">
-                    {{ TROOP_TYPES.INFANTARIA.label }}
-                  </div>
-                  <div class="rc-troop-stats">
-                    <span>⚔️ +{{ TROOP_TYPES.INFANTARIA.force }} força</span>
-                    <span>❤️ {{ TROOP_TYPES.INFANTARIA.hp }} vida</span>
-                  </div>
-                  <div class="rc-troop-costs">
-                    <span title="Custo em dinheiro">
-                      💰 {{ TROOP_TYPES.INFANTARIA.moneyCost }}
-                    </span>
-                    <span title="Custo em manpower">
-                      🪖 {{ TROOP_TYPES.INFANTARIA.manpowerCost }}
-                    </span>
-                    <span title="Produção (tempo de construção da cidade)">
-                      🏭 {{ TROOP_TYPES.INFANTARIA.productionCost }} · ~{{
-                        troopBuildTurns("INFANTARIA")
-                      }}
-                      turno(s)
-                    </span>
-                    <span title="Manutenção por turno">
-                      💸 {{ TROOP_TYPES.INFANTARIA.upkeep }}/turno
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <button
-                class="squad-create rc-recruit-btn"
-                :disabled="
-                  busySquad ||
-                  (playerFaction?.money ?? 0) <
-                    TROOP_TYPES.INFANTARIA.moneyCost ||
-                  (playerFaction?.manpower ?? 0) <
-                    TROOP_TYPES.INFANTARIA.manpowerCost
-                "
-                @click="doRecruit('INFANTARIA')"
-              >
-                Recrutar infantaria
-              </button>
-              <p
-                v-if="
-                  (playerFaction?.money ?? 0) <
-                    TROOP_TYPES.INFANTARIA.moneyCost ||
-                  (playerFaction?.manpower ?? 0) <
-                    TROOP_TYPES.INFANTARIA.manpowerCost
-                "
-                class="squad-warn"
-              >
-                Recursos insuficientes para recrutar.
-              </p>
-            </div>
-
-            <!-- Fila de produção da cidade -->
-            <div class="rc-block">
-              <div class="rc-label">
-                <span>Fila de produção</span>
-                <span class="squad-count">{{ recruitOrdersHere.length }}</span>
-              </div>
-              <div
-                v-for="(o, i) in recruitOrdersHere"
-                :key="o.id"
-                class="rc-order"
-              >
-                <span class="rc-order-pos">{{ i + 1 }}</span>
-                <div class="rc-order-info">
-                  <div class="rc-order-name">
-                    {{ TROOP_TYPES[o.kind].label }}
-                    <span class="dim">→ inventário da cidade</span>
-                  </div>
-                  <div class="rc-progress">
-                    <div
-                      class="rc-progress-fill"
-                      :style="{
-                        width:
-                          Math.min(100, (o.prodDone / o.prodCost) * 100) + '%',
-                      }"
-                    ></div>
-                  </div>
-                  <div class="rc-order-meta">
-                    {{ o.prodDone }}/{{ o.prodCost }} produção
-                    <span class="dimsep">·</span>
-                    <span v-if="i === 0">~{{ recruitEta(o) }} turno(s)</span>
-                    <span v-else class="dim">aguardando na fila</span>
-                  </div>
-                </div>
-                <button
-                  class="sbtn danger rc-cancel"
-                  :disabled="busySquad"
-                  title="Cancelar — devolve o dinheiro e o manpower"
-                  @click="doCancelRecruit(o.id)"
-                >
-                  ✕
-                </button>
-              </div>
-              <p v-if="recruitOrdersHere.length === 0" class="squad-empty">
-                Nenhuma tropa em produção nesta cidade.
-              </p>
-            </div>
-          </template>
         </section>
       </Transition>
 
@@ -1971,6 +2187,18 @@ function provinceFill(p: Province): string {
           </div>
           <div class="city-tabs">
             <button
+              :class="{ on: cityTab === 'city' }"
+              @click="cityTab = 'city'"
+            >
+              Cidade
+            </button>
+            <button
+              :class="{ on: cityTab === 'production' }"
+              @click="cityTab = 'production'"
+            >
+              Produção
+            </button>
+            <button
               :class="{ on: cityTab === 'inventory' }"
               @click="cityTab = 'inventory'"
             >
@@ -1978,84 +2206,280 @@ function provinceFill(p: Province): string {
             </button>
           </div>
           <div class="city-body">
-            <!-- Recursos da cidade (placeholder — sistema de produção em breve) -->
-            <div class="ci-label">Recursos da cidade</div>
-            <div class="ci-resources">
-              <span
-                v-for="s in TERRITORY_STATS"
-                :key="s.key"
-                class="ci-res"
-                :title="s.label"
-              >
-                {{ s.icon }} 0
-              </span>
-            </div>
-            <p class="ci-note">
-              O estoque de recursos da cidade chega com o sistema de produção.
-            </p>
+            <!-- ===== Aba: cidade ===== -->
+            <template v-if="cityTab === 'city' && selectedCity">
+              <div class="ci-stat-grid">
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">👥</span>
+                  <span class="ci-stat-val">
+                    {{ fmt(selectedCity.population) }}
+                  </span>
+                  <span class="ci-stat-label">População</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🌾</span>
+                  <span class="ci-stat-val">
+                    {{ selectedCity.food }}/{{ cityStorage(selectedCity) }}
+                  </span>
+                  <span class="ci-stat-label">Comida (estoque)</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🪖</span>
+                  <span class="ci-stat-val">
+                    {{ fmt(selectedCity.manpowerCap) }}
+                  </span>
+                  <span class="ci-stat-label">Manpower gerado</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🗺️</span>
+                  <span class="ci-stat-val">
+                    {{ cityInfluence(selectedCity) }} tiles
+                  </span>
+                  <span class="ci-stat-label">Influência</span>
+                </div>
+              </div>
+              <div class="ci-label">Comida por turno</div>
+              <div class="ci-food">
+                <span class="up">
+                  +{{ cityFoodProduction(selectedCity) }} produção
+                </span>
+                <span class="down">
+                  −{{ cityFoodConsumption(selectedCity.population) }} consumo
+                </span>
+              </div>
+              <p class="ci-note">{{ cityFoodBalanceNote }}</p>
+            </template>
 
-            <!-- Inventário de tropas -->
-            <div class="ci-label">
-              <span>Tropas no inventário</span>
-              <span class="squad-count">{{ cityTroopsHere.length }}</span>
-            </div>
-            <p v-if="cityTroopsHere.length === 0" class="squad-empty">
-              Nenhuma tropa no inventário — recrute tropas para enchê-lo.
-            </p>
-            <div
-              v-for="t in cityTroopsHere"
-              :key="t.id"
-              class="ci-troop"
-              :class="{ picked: pickedCityTroops.includes(t.id) }"
-            >
-              <input
-                type="checkbox"
-                :value="t.id"
-                v-model="pickedCityTroops"
-              />
-              <span class="ci-troop-icon">{{ TROOP_TYPES[t.kind].icon }}</span>
-              <span class="ci-troop-info">
-                <span class="ci-troop-name">
-                  {{ TROOP_TYPES[t.kind].label }}
+            <!-- ===== Aba: produção ===== -->
+            <template v-else-if="cityTab === 'production'">
+              <p class="ci-note">
+                A cidade constrói um item por vez com a sua produção
+                (<strong>{{ selected.production }}/turno</strong>). Produzir
+                tropas adia o colono e vice-versa.
+              </p>
+
+              <!-- Infantaria -->
+              <div class="rc-block">
+                <div class="rc-troop">
+                  <span class="rc-troop-icon">
+                    {{ TROOP_TYPES.INFANTARIA.icon }}
+                  </span>
+                  <div class="rc-troop-info">
+                    <div class="rc-troop-name">
+                      {{ TROOP_TYPES.INFANTARIA.label }}
+                    </div>
+                    <div class="rc-troop-stats">
+                      <span>⚔️ +{{ TROOP_TYPES.INFANTARIA.force }} força</span>
+                      <span>❤️ {{ TROOP_TYPES.INFANTARIA.hp }} vida</span>
+                    </div>
+                    <div class="rc-troop-costs">
+                      <span title="Custo em dinheiro">
+                        💰 {{ TROOP_TYPES.INFANTARIA.moneyCost }}
+                      </span>
+                      <span title="Custo em manpower">
+                        🪖 {{ TROOP_TYPES.INFANTARIA.manpowerCost }}
+                      </span>
+                      <span title="Produção (tempo de construção)">
+                        🏭 {{ TROOP_TYPES.INFANTARIA.productionCost }} · ~{{
+                          buildTurns(TROOP_TYPES.INFANTARIA.productionCost)
+                        }}
+                        turno(s)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  class="squad-create rc-recruit-btn"
+                  :disabled="
+                    busySquad ||
+                    (playerFaction?.money ?? 0) <
+                      TROOP_TYPES.INFANTARIA.moneyCost ||
+                    (playerFaction?.manpower ?? 0) <
+                      TROOP_TYPES.INFANTARIA.manpowerCost
+                  "
+                  @click="doRecruit('INFANTARIA')"
+                >
+                  Recrutar infantaria
+                </button>
+              </div>
+
+              <!-- Colono -->
+              <div class="rc-block">
+                <div class="rc-troop">
+                  <span class="rc-troop-icon">👷</span>
+                  <div class="rc-troop-info">
+                    <div class="rc-troop-name">Colono</div>
+                    <div class="rc-troop-stats">
+                      <span>🏛️ Funda uma nova cidade</span>
+                    </div>
+                    <div class="rc-troop-costs">
+                      <span title="População retirada da cidade">
+                        👥 {{ fmt(COLONO_COST.population) }}
+                      </span>
+                      <span title="Comida retirada da cidade">
+                        🌾 {{ COLONO_COST.food }}
+                      </span>
+                      <span title="Produção (tempo de construção)">
+                        🏭 {{ COLONO_COST.production }} · ~{{
+                          buildTurns(COLONO_COST.production)
+                        }}
+                        turno(s)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  class="squad-create rc-recruit-btn"
+                  :disabled="
+                    busySquad ||
+                    !selectedCity ||
+                    selectedCity.population < COLONO_COST.population ||
+                    selectedCity.food < COLONO_COST.food
+                  "
+                  @click="doRecruitColono"
+                >
+                  Construir colono
+                </button>
+                <p
+                  v-if="
+                    selectedCity &&
+                    (selectedCity.population < COLONO_COST.population ||
+                      selectedCity.food < COLONO_COST.food)
+                  "
+                  class="squad-warn"
+                >
+                  Precisa de {{ fmt(COLONO_COST.population) }} de população e
+                  {{ COLONO_COST.food }} de comida na cidade.
+                </p>
+              </div>
+
+              <!-- Fila de produção -->
+              <div class="rc-block">
+                <div class="rc-label">
+                  <span>Fila de produção</span>
+                  <span class="squad-count">
+                    {{ recruitOrdersHere.length }}
+                  </span>
+                </div>
+                <div
+                  v-for="(o, i) in recruitOrdersHere"
+                  :key="o.id"
+                  class="rc-order"
+                >
+                  <span class="rc-order-pos">{{ i + 1 }}</span>
+                  <div class="rc-order-info">
+                    <div class="rc-order-name">
+                      {{ o.kind === "COLONO" ? "Colono" : TROOP_TYPES[o.kind].label }}
+                      <span class="dim">
+                        {{
+                          o.kind === "COLONO"
+                            ? "→ esquadrão de colonos"
+                            : "→ inventário da cidade"
+                        }}
+                      </span>
+                    </div>
+                    <div class="rc-progress">
+                      <div
+                        class="rc-progress-fill"
+                        :style="{
+                          width:
+                            Math.min(100, (o.prodDone / o.prodCost) * 100) +
+                            '%',
+                        }"
+                      ></div>
+                    </div>
+                    <div class="rc-order-meta">
+                      {{ o.prodDone }}/{{ o.prodCost }} produção
+                      <span class="dimsep">·</span>
+                      <span v-if="i === 0">~{{ recruitEta(o) }} turno(s)</span>
+                      <span v-else class="dim">aguardando na fila</span>
+                    </div>
+                  </div>
+                  <button
+                    class="sbtn danger rc-cancel"
+                    :disabled="busySquad"
+                    title="Cancelar — devolve os recursos pagos"
+                    @click="doCancelRecruit(o.id)"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p v-if="recruitOrdersHere.length === 0" class="squad-empty">
+                  Nada em produção nesta cidade.
+                </p>
+              </div>
+            </template>
+
+            <!-- ===== Aba: inventário ===== -->
+            <template v-else>
+              <div class="ci-label">
+                <span>Tropas no inventário</span>
+                <span class="squad-count">{{ cityTroopsHere.length }}</span>
+              </div>
+              <p v-if="cityTroopsHere.length === 0" class="squad-empty">
+                Nenhuma tropa no inventário — recrute tropas para enchê-lo.
+              </p>
+              <div
+                v-for="t in cityTroopsHere"
+                :key="t.id"
+                class="ci-troop"
+                :class="{ picked: pickedCityTroops.includes(t.id) }"
+              >
+                <input
+                  type="checkbox"
+                  :value="t.id"
+                  v-model="pickedCityTroops"
+                />
+                <span class="ci-troop-icon">
+                  {{ TROOP_TYPES[t.kind].icon }}
                 </span>
-                <span class="ci-troop-sub">
-                  ❤️ {{ t.hp }}/{{ t.maxHp }}
-                  <span class="dimsep">·</span>
-                  {{ levelLabel(t.xp) }}
+                <span class="ci-troop-info">
+                  <span class="ci-troop-name">
+                    {{ TROOP_TYPES[t.kind].label }}
+                  </span>
+                  <span class="ci-troop-sub">
+                    ❤️ {{ t.hp }}/{{ t.maxHp }}
+                    <span class="dimsep">·</span>
+                    {{ levelLabel(t.xp) }}
+                  </span>
                 </span>
-              </span>
+                <button
+                  class="mini-btn"
+                  :disabled="busySquad || playerSquadsHere.length === 0"
+                  :title="
+                    playerSquadsHere.length === 0
+                      ? 'Nenhum esquadrão estacionado na cidade'
+                      : 'Enviar esta tropa a um esquadrão'
+                  "
+                  @click="sendTroopsToSquad([t.id])"
+                >
+                  Add ao esquadrão
+                </button>
+              </div>
+
               <button
-                class="mini-btn"
-                :disabled="busySquad || playerSquadsHere.length === 0"
-                :title="
+                v-if="cityTroopsHere.length > 0"
+                class="squad-create ci-move-btn"
+                :disabled="
+                  busySquad ||
+                  pickedCityTroops.length === 0 ||
                   playerSquadsHere.length === 0
-                    ? 'Nenhum esquadrão estacionado na cidade'
-                    : 'Enviar esta tropa a um esquadrão'
                 "
-                @click="sendTroopsToSquad([t.id])"
+                @click="sendTroopsToSquad(pickedCityTroops)"
               >
-                Add ao esquadrão
+                Mover {{ pickedCityTroops.length }} selecionada(s) para
+                esquadrão
               </button>
-            </div>
-
-            <button
-              v-if="cityTroopsHere.length > 0"
-              class="squad-create ci-move-btn"
-              :disabled="
-                busySquad ||
-                pickedCityTroops.length === 0 ||
-                playerSquadsHere.length === 0
-              "
-              @click="sendTroopsToSquad(pickedCityTroops)"
-            >
-              Mover {{ pickedCityTroops.length }} selecionada(s) para esquadrão
-            </button>
-            <p
-              v-if="cityTroopsHere.length > 0 && playerSquadsHere.length === 0"
-              class="squad-warn"
-            >
-              É preciso um esquadrão estacionado na cidade para receber tropas.
-            </p>
+              <p
+                v-if="
+                  cityTroopsHere.length > 0 && playerSquadsHere.length === 0
+                "
+                class="squad-warn"
+              >
+                É preciso um esquadrão estacionado na cidade para receber
+                tropas.
+              </p>
+            </template>
           </div>
         </section>
       </Transition>
@@ -3477,6 +3901,16 @@ function provinceFill(p: Province): string {
   background: rgba(207, 107, 74, 0.2);
   color: #f0a98f;
 }
+/* Botão "Fundar cidade" de um esquadrão de colonos */
+.sbtn.ok {
+  border-color: #e8c14a;
+  color: #e8c14a;
+}
+.sbtn.ok:hover:not(:disabled) {
+  border-color: #e8c14a;
+  background: rgba(232, 193, 74, 0.18);
+  color: #f3d069;
+}
 /* Modificadores de ambiente da batalha */
 .env-mods {
   display: flex;
@@ -4237,19 +4671,57 @@ tr.me {
 .ci-label:first-child {
   margin-top: 0;
 }
-.ci-resources {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+/* Grade de status da aba Cidade */
+.ci-stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
 }
-.ci-res {
-  font-size: 0.78rem;
+.ci-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 9px 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.ci-stat-icon {
+  font-size: 1rem;
+}
+.ci-stat-val {
+  font-size: 0.92rem;
+  font-weight: 800;
+  color: #e6e9ee;
+}
+.ci-stat-label {
+  font-size: 0.62rem;
   font-weight: 700;
-  color: #cdd2da;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8a92a0;
+}
+/* Linha de produção × consumo de comida */
+.ci-food {
+  display: flex;
+  gap: 8px;
+}
+.ci-food span {
+  flex: 1;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 700;
   background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 5px 9px;
+  padding: 6px 8px;
+}
+.ci-food .up {
+  color: #9ad187;
+}
+.ci-food .down {
+  color: #e6917a;
 }
 .ci-note {
   margin: 7px 0 0;

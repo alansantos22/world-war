@@ -24,11 +24,15 @@ export interface FactionState {
   culture: number;
 }
 
-/** Valores iniciais de toda facção ao começar uma partida. */
+/**
+ * Valores iniciais de toda facção ao começar uma partida. O **manpower**
+ * começa em 0: ele passa a vir das **cidades** (1% da população — ver
+ * `cities.ts`), e a capital de cada nação semeia o manpower inicial.
+ */
 export const STARTING_FACTION: Omit<FactionState, 'code'> = {
   money: 1000,
   influence: 100,
-  manpower: 10000,
+  manpower: 0,
   researchPoints: 0,
   culture: 0,
 };
@@ -65,9 +69,12 @@ export interface TerritoryProduction {
   cultureProduction: number;
 }
 
-/** Os valores de um território, na ordem em que aparecem na HUD. */
+/**
+ * Os valores de um território, na ordem em que aparecem na HUD. O manpower
+ * **não** aparece aqui: ele passa a ser gerado pelas cidades (ver `cities.ts`),
+ * não pelas províncias.
+ */
 export const TERRITORY_STATS: (StatInfo & { key: keyof TerritoryProduction })[] = [
-  { key: 'manpowerProduction', label: 'Manpower / turno', icon: '🪖', color: '#cf6b4a' },
   { key: 'resourceProduction', label: 'Recurso local', icon: '📦', color: '#c9a24a' },
   { key: 'production', label: 'Produção', icon: '🏭', color: '#8aa0b8' },
   { key: 'researchProduction', label: 'Pesquisa / turno', icon: '🔬', color: '#7fb86b' },

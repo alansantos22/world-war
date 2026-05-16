@@ -11,6 +11,7 @@
  */
 
 import { getDb } from '../db';
+import { COLONO_COST, destroySettlerSquadsAt } from './cities';
 
 /** Custo, em dinheiro, para montar um esquadrão. */
 export const SQUAD_COST = 500;
@@ -110,6 +111,13 @@ export function levelProgress(xp: number): LevelProgress {
 
 /** Tipos de tropa recrutáveis. Hoje só há infantaria. */
 export type TroopKind = 'INFANTARIA';
+
+/**
+ * O que uma cidade pode pôr na sua fila de produção: as tropas e o **colono**
+ * (que não é uma tropa de esquadrão — ver `cities.ts`). A fila é única por
+ * cidade, então produzir tropas adia o colono e vice-versa.
+ */
+export type RecruitKind = TroopKind | 'COLONO';
 
 /** Catálogo de uma tropa recrutável. */
 export interface TroopType {
@@ -493,6 +501,15 @@ export async function moveSquad(
      WHERE id = ?`,
     [x, y, currentTurn, MORAL_MOVE_COST, squadId],
   );
+  // Civ5: um esquadrão militar que entra num tile destrói os esquadrões de
+  // colonos inimigos que estiverem nele (civis não resistem a tropas).
+  const info = await db.select<{ save_id: number; owner_code: string }[]>(
+    'SELECT save_id, owner_code FROM squads WHERE id = ?',
+    [squadId],
+  );
+  if (info[0]) {
+    await destroySettlerSquadsAt(info[0].save_id, x, y, info[0].owner_code);
+  }
 }
 
 /** Exclui uma tropa de um esquadrão. */
@@ -555,9 +572,9 @@ export interface RecruitOrder {
   y: number;
   /** Facção dona. */
   ownerCode: string;
-  /** Tipo da tropa. */
-  kind: TroopKind;
-  /** Produção necessária para concluir a tropa. */
+  /** O que está sendo produzido (tropa ou colono). */
+  kind: RecruitKind;
+  /** Produção necessária para concluir o item. */
   prodCost: number;
   /** Produção já acumulada. */
   prodDone: number;
@@ -588,7 +605,7 @@ export async function loadRecruitOrders(
     x: r.x,
     y: r.y,
     ownerCode: r.owner_code,
-    kind: r.kind as TroopKind,
+    kind: r.kind as RecruitKind,
     prodCost: r.prod_cost,
     prodDone: r.prod_done,
   }));
@@ -604,9 +621,51 @@ export async function queueRecruit(
   ownerCode: string,
   x: number,
   y: number,
-  kind: TroopKind,
+  kind: RecruitKind,
 ): Promise<void> {
   const db = await getDb();
+
+  // O colono é pago com a **população** e a **comida** da própria cidade.
+  if (kind === 'COLONO') {
+    const cityRows = await db.select<
+      { id: number; population: number; food: number }[]
+    >('SELECT id, population, food FROM cities WHERE save_id = ? AND x = ? AND y = ?', [
+      saveId,
+      x,
+      y,
+    ]);
+    const city = cityRows[0];
+    if (!city) throw new Error('Só é possível produzir colonos numa cidade.');
+    if (city.population < COLONO_COST.population) {
+      throw new Error(
+        `População insuficiente para um colono (${COLONO_COST.population.toLocaleString(
+          'pt-BR',
+        )}).`,
+      );
+    }
+    if (city.food < COLONO_COST.food) {
+      throw new Error(`Comida insuficiente para um colono (${COLONO_COST.food}).`);
+    }
+    await db.execute('BEGIN');
+    try {
+      await db.execute(
+        'UPDATE cities SET population = population - ?, food = food - ? WHERE id = ?',
+        [COLONO_COST.population, COLONO_COST.food, city.id],
+      );
+      await db.execute(
+        `INSERT INTO recruit_orders
+           (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done)
+         VALUES (?, ?, ?, ?, 0, 'COLONO', ?, 0)`,
+        [saveId, x, y, ownerCode, COLONO_COST.production],
+      );
+      await db.execute('COMMIT');
+    } catch (e) {
+      await db.execute('ROLLBACK');
+      throw e;
+    }
+    return;
+  }
+
   const troop = TROOP_TYPES[kind];
 
   const rows = await db.select<{ money: number; manpower: number }[]>(
@@ -642,7 +701,10 @@ export async function queueRecruit(
   }
 }
 
-/** Cancela uma ordem de recrutamento e devolve o dinheiro e o manpower pagos. */
+/**
+ * Cancela uma ordem de recrutamento e devolve o que foi pago ao enfileirar —
+ * dinheiro e manpower para tropas; população e comida (à cidade) para colonos.
+ */
 export async function cancelRecruit(orderId: number): Promise<void> {
   const db = await getDb();
   const rows = await db.select<RecruitRow[]>(
@@ -651,14 +713,22 @@ export async function cancelRecruit(orderId: number): Promise<void> {
   );
   const o = rows[0];
   if (!o) return;
-  const troop = TROOP_TYPES[o.kind as TroopKind];
   await db.execute('BEGIN');
   try {
-    await db.execute(
-      `UPDATE factions SET money = money + ?, manpower = manpower + ?
-       WHERE save_id = ? AND code = ?`,
-      [troop.moneyCost, troop.manpowerCost, o.save_id, o.owner_code],
-    );
+    if (o.kind === 'COLONO') {
+      await db.execute(
+        `UPDATE cities SET population = population + ?, food = food + ?
+         WHERE save_id = ? AND x = ? AND y = ?`,
+        [COLONO_COST.population, COLONO_COST.food, o.save_id, o.x, o.y],
+      );
+    } else {
+      const troop = TROOP_TYPES[o.kind as TroopKind];
+      await db.execute(
+        `UPDATE factions SET money = money + ?, manpower = manpower + ?
+         WHERE save_id = ? AND code = ?`,
+        [troop.moneyCost, troop.manpowerCost, o.save_id, o.owner_code],
+      );
+    }
     await db.execute('DELETE FROM recruit_orders WHERE id = ?', [orderId]);
     await db.execute('COMMIT');
   } catch (e) {

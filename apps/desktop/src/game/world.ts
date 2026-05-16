@@ -26,6 +26,18 @@ import {
   type RecruitOrder,
   type TroopKind,
 } from './squads';
+import {
+  cityFoodConsumption,
+  cityFoodProduction,
+  cityManpower,
+  cityStorage,
+  loadCities,
+  CAPITAL_START_FOOD,
+  CAPITAL_START_POP,
+  DISCONNECT_FOOD_PENALTY,
+  STARVATION_LOSS,
+  type City,
+} from './cities';
 
 /** Uma província do mapa já persistida (1 célula de terra, com id do banco). */
 export interface Province extends TerritoryProduction {
@@ -300,6 +312,36 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
+  // Cidades — tiles especiais com população, comida e zona de influência.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS cities (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id      INTEGER NOT NULL,
+      x            INTEGER NOT NULL,
+      y            INTEGER NOT NULL,
+      owner_code   TEXT    NOT NULL,
+      is_capital   INTEGER NOT NULL DEFAULT 0,
+      population   INTEGER NOT NULL,
+      food         INTEGER NOT NULL,
+      manpower_cap INTEGER NOT NULL DEFAULT 0,
+      founded_turn INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+
+  // Esquadrões de colonos — unidades civis que fundam cidades.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS settler_squads (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id         INTEGER NOT NULL,
+      owner_code      TEXT    NOT NULL,
+      x               INTEGER NOT NULL,
+      y               INTEGER NOT NULL,
+      count           INTEGER NOT NULL DEFAULT 1,
+      created_turn    INTEGER NOT NULL,
+      last_moved_turn INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
   const cols = await db.select<{ name: string }[]>(
     'PRAGMA table_info(provinces)',
   );
@@ -488,6 +530,77 @@ async function insertFactions(saveId: number, codes: string[]): Promise<void> {
   }
 }
 
+/**
+ * Cria uma **cidade** em cada província-capital de uma partida — capitais já
+ * nascem como cidade (`1.000.000` de população, `10` de comida). Se
+ * `grantManpower` for `true`, soma também o manpower inicial (1% da população)
+ * à facção dona; partidas antigas migradas não recebem esse bônus, pois já
+ * têm o manpower do modelo anterior.
+ */
+async function seedCapitalCities(
+  saveId: number,
+  provinces: {
+    x: number;
+    y: number;
+    ownerCode: string | null;
+    isCapital: boolean;
+  }[],
+  grantManpower: boolean,
+): Promise<void> {
+  const db = await getDb();
+  const caps = provinces.filter((p) => p.isCapital && p.ownerCode);
+  if (caps.length === 0) return;
+  const mp = cityManpower(CAPITAL_START_POP);
+  await db.execute('BEGIN');
+  try {
+    for (const p of caps) {
+      await db.execute(
+        `INSERT INTO cities
+           (save_id, x, y, owner_code, is_capital, population, food,
+            manpower_cap, founded_turn)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, 1)`,
+        [
+          saveId,
+          p.x,
+          p.y,
+          p.ownerCode,
+          CAPITAL_START_POP,
+          CAPITAL_START_FOOD,
+          mp,
+        ],
+      );
+      if (grantManpower) {
+        await db.execute(
+          'UPDATE factions SET manpower = manpower + ? WHERE save_id = ? AND code = ?',
+          [mp, saveId, p.ownerCode],
+        );
+      }
+    }
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+}
+
+/**
+ * Migração: partidas anteriores ao sistema de cidades não têm linhas em
+ * `cities`. Se for o caso, semeia as cidades nas capitais (sem o bônus de
+ * manpower — essas facções já o têm).
+ */
+async function ensureCapitalCities(
+  saveId: number,
+  provinces: Province[],
+): Promise<void> {
+  const db = await getDb();
+  const rows = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM cities WHERE save_id = ?',
+    [saveId],
+  );
+  if ((rows[0]?.n ?? 0) > 0) return;
+  await seedCapitalCities(saveId, provinces, false);
+}
+
 async function readProvinces(saveId: number): Promise<Province[]> {
   const db = await getDb();
   const rows = await db.select<ProvinceRow[]>(
@@ -559,9 +672,12 @@ export async function createGame(
   const saveId = res.lastInsertId;
   if (saveId == null) throw new Error('Falha ao criar a partida.');
 
-  await insertProvinces(saveId, generateMap(buildSeeds(customContinent)).provinces);
+  const map = generateMap(buildSeeds(customContinent));
+  await insertProvinces(saveId, map.provinces);
   const codes = isCustom ? [...NATION_CODES, CUSTOM_NATION_CODE] : NATION_CODES;
   await insertFactions(saveId, codes);
+  // Cada capital nasce como cidade e semeia o manpower inicial da facção.
+  await seedCapitalCities(saveId, map.provinces, true);
   return saveId;
 }
 
@@ -588,7 +704,9 @@ export async function getSave(saveId: number): Promise<GameSave> {
 /** Carrega as províncias de uma partida salva. */
 export async function loadMap(saveId: number): Promise<Province[]> {
   await ensureSchema();
-  return readProvinces(saveId);
+  const provinces = await readProvinces(saveId);
+  await ensureCapitalCities(saveId, provinces);
+  return provinces;
 }
 
 /**
@@ -633,12 +751,60 @@ export async function regenerateMap(saveId: number): Promise<Province[]> {
   await db.execute('DELETE FROM battle_logs WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM city_troops WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM squads WHERE save_id = ?', [saveId]);
-  await insertProvinces(
-    saveId,
-    generateMap(buildSeeds(save.customNation?.continent ?? null)).provinces,
-  );
+  // As cidades e os esquadrões de colonos também ficavam sobre o mapa antigo.
+  await db.execute('DELETE FROM cities WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM settler_squads WHERE save_id = ?', [saveId]);
+  const map = generateMap(buildSeeds(save.customNation?.continent ?? null));
+  await insertProvinces(saveId, map.provinces);
+  // As facções são mantidas no "Novo mapa", então as capitais são semeadas
+  // sem o bônus de manpower (a facção já o tem).
+  await seedCapitalCities(saveId, map.provinces, false);
   await touchSave(saveId);
   return readProvinces(saveId);
+}
+
+/** As 8 direções vizinhas de uma célula. */
+const NEIGHBORS_8: [number, number][] = [
+  [-1, -1],
+  [0, -1],
+  [1, -1],
+  [-1, 0],
+  [1, 0],
+  [-1, 1],
+  [0, 1],
+  [1, 1],
+];
+
+/**
+ * `true` se a cidade tem uma **conexão** de tiles possuídos pela facção até
+ * outra cidade da mesma facção. Uma cidade isolada (única da facção) conta
+ * como conectada — não há a quem se ligar. Sem conexão, a cidade paga um
+ * sobrecusto de comida (ver `advanceTurn`).
+ */
+function isCityConnected(
+  city: City,
+  cities: City[],
+  ownedTiles: Set<string>,
+): boolean {
+  const targets = new Set(
+    cities
+      .filter((c) => c.ownerCode === city.ownerCode && c.id !== city.id)
+      .map((c) => `${c.x},${c.y}`),
+  );
+  if (targets.size === 0) return true;
+  const visited = new Set([`${city.x},${city.y}`]);
+  const queue: { x: number; y: number }[] = [{ x: city.x, y: city.y }];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const [dx, dy] of NEIGHBORS_8) {
+      const k = `${cur.x + dx},${cur.y + dy}`;
+      if (visited.has(k) || !ownedTiles.has(k)) continue;
+      if (targets.has(k)) return true;
+      visited.add(k);
+      queue.push({ x: cur.x + dx, y: cur.y + dy });
+    }
+  }
+  return false;
 }
 
 /** O que `advanceTurn` devolve: o novo turno e as facções atualizadas. */
@@ -650,15 +816,17 @@ export interface TurnResult {
 /**
  * Avança a partida em um turno:
  *
- * - cada facção recebe o **manpower**, os **pontos de pesquisa** e a
- *   **cultura** produzidos pelas suas províncias (as capitais produzem o
- *   dobro — ver `map-generator`);
+ * - cada facção recebe os **pontos de pesquisa** e a **cultura** produzidos
+ *   pelas suas províncias (as capitais produzem o dobro — ver `map-generator`);
+ * - cada **cidade** processa o seu ciclo: produz/consome **comida**, cresce ou
+ *   encolhe de **população** e concede **manpower** à facção (1% da população,
+ *   só quando a população cresce — ver `cities.ts`);
  * - cada facção paga a **manutenção** do seu exército em **dinheiro** —
  *   esquadrões e tropas de inventário; quem está num tile da própria facção
  *   custa **metade** (ver `squadUpkeepAt`);
  * - a **fila de recrutamento** de cada cidade avança: a produção da província
- *   é gasta na primeira tropa da fila e, quando concluída, ela entra no
- *   inventário da cidade;
+ *   é gasta no primeiro item da fila e, quando concluído, uma tropa entra no
+ *   inventário da cidade ou um colono reforça um esquadrão de colonos no tile;
  * - cada esquadrão parado em **território próprio** recupera vida (comandante
  *   e tropas); os esquadrões que não lutaram nem se moveram recuperam
  *   **moral** (o dobro em território próprio);
@@ -673,16 +841,12 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const provinces = await readProvinces(saveId);
   const factions = await loadFactions(saveId);
 
-  // Soma, por facção, a produção das suas províncias.
-  const gain = new Map<
-    string,
-    { manpower: number; research: number; culture: number }
-  >();
+  // Soma, por facção, a pesquisa e a cultura das suas províncias. O manpower
+  // **não** vem mais das províncias — agora é gerado pelas cidades.
+  const gain = new Map<string, { research: number; culture: number }>();
   for (const p of provinces) {
     if (!p.ownerCode) continue;
-    const g =
-      gain.get(p.ownerCode) ?? { manpower: 0, research: 0, culture: 0 };
-    g.manpower += p.manpowerProduction;
+    const g = gain.get(p.ownerCode) ?? { research: 0, culture: 0 };
     g.research += p.researchProduction;
     g.culture += p.cultureProduction;
     gain.set(p.ownerCode, g);
@@ -730,21 +894,84 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     ownerCode: string;
     kind: TroopKind;
   }[] = [];
+  // Colonos concluídos viram (ou reforçam) um esquadrão de colonos no tile.
+  const newColonos: { x: number; y: number; ownerCode: string }[] = [];
   for (const [k, front] of frontByTile) {
     const prov = provByTile.get(k);
     if (!prov) continue;
     const done = front.prodDone + prov.production;
     if (done >= front.prodCost) {
       finishedOrders.push(front.id);
-      newTroops.push({
-        x: front.x,
-        y: front.y,
-        ownerCode: front.ownerCode,
-        kind: front.kind,
-      });
+      if (front.kind === 'COLONO') {
+        newColonos.push({ x: front.x, y: front.y, ownerCode: front.ownerCode });
+      } else {
+        newTroops.push({
+          x: front.x,
+          y: front.y,
+          ownerCode: front.ownerCode,
+          kind: front.kind,
+        });
+      }
     } else {
       orderProgress.push({ id: front.id, prodDone: done });
     }
+  }
+
+  // Ciclo de turno das cidades: comida, crescimento da população e manpower.
+  const cities = await loadCities(saveId);
+  const ownedTilesByFaction = new Map<string, Set<string>>();
+  for (const p of provinces) {
+    if (!p.ownerCode) continue;
+    let set = ownedTilesByFaction.get(p.ownerCode);
+    if (!set) {
+      set = new Set<string>();
+      ownedTilesByFaction.set(p.ownerCode, set);
+    }
+    set.add(`${p.x},${p.y}`);
+  }
+  const cityUpdates: {
+    id: number;
+    population: number;
+    food: number;
+    manpowerCap: number;
+  }[] = [];
+  /** Manpower que as cidades concedem à facção neste turno (crescimento). */
+  const cityManpowerGain = new Map<string, number>();
+  for (const c of cities) {
+    const prod = cityFoodProduction(c);
+    let cons = cityFoodConsumption(c.population);
+    // Cidade comum sem conexão à facção paga +30% de comida.
+    if (
+      !c.isCapital &&
+      !isCityConnected(c, cities, ownedTilesByFaction.get(c.ownerCode) ?? new Set())
+    ) {
+      cons = Math.ceil(cons * DISCONNECT_FOOD_PENALTY);
+    }
+    let food = Math.min(cityStorage(c), c.food + prod);
+    let population = c.population;
+    if (food >= cons) {
+      food -= cons;
+      // Cada ponto de comida em excedente faz a população crescer 1%.
+      const surplus = prod - cons;
+      if (surplus > 0) {
+        population = Math.round(population * (1 + surplus / 100));
+      }
+    } else {
+      // Sem comida para o mínimo: a cidade perde 3% da população.
+      food = 0;
+      population = Math.round(population * (1 - STARVATION_LOSS));
+    }
+    // Manpower é uma catraca: 1% da população, e só sobe quando ela cresce.
+    let manpowerCap = c.manpowerCap;
+    const newCap = cityManpower(population);
+    if (newCap > manpowerCap) {
+      cityManpowerGain.set(
+        c.ownerCode,
+        (cityManpowerGain.get(c.ownerCode) ?? 0) + (newCap - manpowerCap),
+      );
+      manpowerCap = newCap;
+    }
+    cityUpdates.push({ id: c.id, population, food, manpowerCap });
   }
 
   // Recuperação por turno dos esquadrões:
@@ -782,18 +1009,27 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     for (const f of factions) {
       const g = gain.get(f.code);
       const up = upkeep.get(f.code) ?? 0;
-      if (!g && !up) continue;
+      const mpGain = cityManpowerGain.get(f.code) ?? 0;
+      if (!g && !up && !mpGain) continue;
       if (g) {
-        f.manpower += g.manpower;
         f.researchPoints += g.research;
         f.culture += g.culture;
       }
+      // Manpower vem do crescimento das cidades (1% da nova população).
+      f.manpower += mpGain;
       // O dinheiro não pode ficar negativo: a manutenção é limitada ao caixa.
       if (up) f.money = Math.max(0, f.money - up);
       await db.execute(
         `UPDATE factions SET money = ?, manpower = ?, research_points = ?, culture = ?
          WHERE save_id = ? AND code = ?`,
         [f.money, f.manpower, f.researchPoints, f.culture, saveId, f.code],
+      );
+    }
+    // Aplica o ciclo de turno das cidades (comida, população, manpower-teto).
+    for (const u of cityUpdates) {
+      await db.execute(
+        'UPDATE cities SET population = ?, food = ?, manpower_cap = ? WHERE id = ?',
+        [u.population, u.food, u.manpowerCap, u.id],
       );
     }
     // Avança / conclui a fila de recrutamento.
@@ -813,6 +1049,28 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
         [saveId, t.x, t.y, t.ownerCode, t.kind, troop.hp, troop.hp],
       );
+    }
+    // Colonos concluídos entram num esquadrão de colonos do tile (criando um
+    // novo, ou reforçando o que a facção já tiver ali).
+    for (const c of newColonos) {
+      const existing = await db.select<{ id: number }[]>(
+        `SELECT id FROM settler_squads
+          WHERE save_id = ? AND owner_code = ? AND x = ? AND y = ? LIMIT 1`,
+        [saveId, c.ownerCode, c.x, c.y],
+      );
+      if (existing[0]) {
+        await db.execute(
+          'UPDATE settler_squads SET count = count + 1 WHERE id = ?',
+          [existing[0].id],
+        );
+      } else {
+        await db.execute(
+          `INSERT INTO settler_squads
+             (save_id, owner_code, x, y, count, created_turn, last_moved_turn)
+           VALUES (?, ?, ?, ?, 1, ?, 0)`,
+          [saveId, c.ownerCode, c.x, c.y, turn],
+        );
+      }
     }
     // Recupera a vida dos esquadrões em território próprio.
     for (const h of cmdHeal) {

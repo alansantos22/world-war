@@ -38,7 +38,7 @@ export const NATIONS: Nation[] = [
   },
   {
     code: 'URU',
-    name: 'União das Repúblicas Unidas',
+    name: 'União das Repúblicas Americanas',
     realWorld: 'América do Norte',
     color: '#3b6fb5',
     alignment: 'REPUBLICA',

@@ -82,7 +82,9 @@ export const CONTINENT_NAMES: Record<string, string> = {
 const LAND: Record<string, number[][]> = {
   N: [
     [2, 6, 13], [3, 5, 15], [4, 4, 16], [5, 4, 16], [6, 5, 15],
-    [7, 6, 14], [8, 7, 13], [9, 8, 12], [10, 9, 12], [11, 9, 11], [12, 10, 11],
+    [7, 6, 14], [8, 7, 13], [9, 8, 12], [10, 9, 12], [11, 9, 11],
+    // O istmo: liga a América do Norte à do Sul (col 13 encosta na col 14 da S).
+    [12, 10, 13],
   ],
   S: [
     [12, 14, 18], [13, 13, 19], [14, 12, 20], [15, 13, 19], [16, 13, 19],

@@ -22,8 +22,10 @@ políticos; cada facção tem os seus **valores**, cada território a sua
 o jogo já avança por **turnos** (1 semana cada), em que as facções recebem a
 produção das suas províncias e pagam a manutenção dos seus exércitos; o
 jogador monta, move e dissolve **esquadrões** militares, **recruta tropas**,
-**ataca** territórios e esquadrões inimigos e **toma** territórios neutros. A
-IA, os eventos e a diplomacia ainda serão implementados.
+**ataca** territórios e esquadrões inimigos e **toma** territórios neutros;
+cada nação tem **cidades** — começando pela capital — com população, comida e
+zona de influência, e pode **fundar novas cidades** com colonos. A IA, os
+eventos e a diplomacia ainda serão implementados.
 
 ---
 
@@ -92,9 +94,9 @@ geração do mapa):
 
 | Valor               | Descrição                                              |
 |---------------------|--------------------------------------------------------|
-| Manpower / turno    | Quanto manpower (população mobilizável) a província gera. |
+| Manpower / turno    | *Legado* — o manpower agora vem das **cidades** (seção 12); o valor segue sorteado mas não é mais acumulado. |
 | Recurso local       | Quanto do recurso da província é produzido.            |
-| Produção            | Produção industrial estilo *Civilization* (futuras tropas/construções). |
+| Produção            | Produção industrial estilo *Civilization* — usada pela cidade na **fila de produção** (tropas e colonos). |
 | Pesquisa / turno    | Pontos de pesquisa gerados pela província.             |
 | Cultura / turno     | Cultura gerada pela província.                         |
 
@@ -102,11 +104,11 @@ As **capitais produzem o dobro** de cada valor. Os números são sorteados a
 cada "Novo mapa" e ficam visíveis no painel da província. A produção do
 **recurso local** ainda recebe um **bônus de clima** (ver seção 10).
 
-A cada turno (ver seção 9), o **manpower**, a **pesquisa** e a **cultura**
-produzidos são somados aos valores da facção dona. "Recurso local" e
-"produção industrial" ainda **não são acumulados** — ficam reservados para
-mecânicas futuras
-(efeito dos recursos, construção de tropas/edifícios).
+A cada turno (ver seção 9), a **pesquisa** e a **cultura** produzidas são
+somadas aos valores da facção dona. O **manpower** deixou de vir das províncias
+— agora é gerado pelas **cidades** (1% da população — ver seção 12). "Recurso
+local" ainda **não é acumulado** — fica reservado para mecânicas futuras
+(efeito dos recursos).
 
 ---
 
@@ -119,7 +121,7 @@ Todo o resto do mundo começa **neutro**.
 | Nação                          | País real                    | Direcionamento        |
 |--------------------------------|-------------------------------|-----------------------|
 | Império do Brasil              | Brasil                        | Império               |
-| União das Repúblicas Unidas    | América do Norte              | Repúblicas            |
+| União das Repúblicas Americanas    | América do Norte              | Repúblicas            |
 | Império Britânico              | Reino Unido                   | Império               |
 | Império da China               | China                         | Império               |
 | Império do Japão               | Japão                         | Império               |
@@ -150,13 +152,16 @@ persistidos na tabela `factions`:
 | Cultura             | Cultura acumulada.                                 |
 
 Toda facção começa a partida com os **mesmos valores iniciais**
-(`STARTING_FACTION`): 1.000 de dinheiro, 100 de influência, 10.000 de
-manpower, 0 de pesquisa e 0 de cultura. Os valores da facção do jogador ficam
-visíveis na **barra superior** da HUD (ver seção 8).
+(`STARTING_FACTION`): 1.000 de dinheiro, 100 de influência, 0 de manpower, 0 de
+pesquisa e 0 de cultura. O **manpower inicial** não é fixo: vem da **capital**,
+que nasce como cidade com 1.000.000 de habitantes ⇒ 1% = 10.000 de manpower
+(ver seção 12). Os valores da facção do jogador ficam visíveis na **barra
+superior** da HUD (ver seção 8).
 
 A cada turno a facção recebe a produção das suas províncias (ver seção 9):
-**manpower**, **pesquisa** e **cultura** crescem. Dinheiro e influência ainda
-**não têm fonte de produção** — ficam parados até definirmos de onde vêm.
+**pesquisa** e **cultura** crescem. O **manpower** cresce quando as **cidades**
+ganham população (seção 12). Dinheiro e influência ainda **não têm fonte de
+produção** — só a despesa de manutenção do exército toca o dinheiro.
 
 ### Bandeiras
 
@@ -358,8 +363,8 @@ Uma linha por **tropa na fila de produção** de uma cidade (ver seção 11).
 | `x`, `y`     | INTEGER | Tile da cidade que produz a tropa.              |
 | `owner_code` | TEXT    | Facção dona.                                    |
 | `squad_id`   | INTEGER | Coluna legada (a tropa pronta vai para o inventário da cidade). |
-| `kind`       | TEXT    | Tipo da tropa.                                  |
-| `prod_cost`  | INTEGER | Produção necessária para concluir a tropa.      |
+| `kind`       | TEXT    | O que está sendo produzido (`INFANTARIA` ou `COLONO`). |
+| `prod_cost`  | INTEGER | Produção necessária para concluir o item.       |
 | `prod_done`  | INTEGER | Produção já acumulada.                          |
 
 ### Tabela `battle_logs`
@@ -390,12 +395,44 @@ fora de um esquadrão (ver seção 11).
 | `max_hp`     | INTEGER | Pontos de vida máximos.                         |
 | `xp`         | INTEGER | Experiência de batalha da tropa.                |
 
-Criar um novo jogo gera o mapa, grava as províncias e cria as facções daquela
-partida; carregar uma partida lê províncias e facções do seu `save_id`. "Novo
-mapa" apaga e regenera só o mapa da partida atual (as facções são mantidas).
-Bancos de versões antigas (sem `save_id`) são migrados para uma partida
-"Partida recuperada"; saves anteriores à tabela `factions` ou às colunas de
-produção recebem os valores iniciais ao serem carregados.
+### Tabela `cities`
+
+Uma linha por **cidade** de uma partida (ver seção 12).
+
+| Coluna         | Tipo    | Descrição                                     |
+|----------------|---------|-----------------------------------------------|
+| `id`           | INTEGER | Chave primária.                               |
+| `save_id`      | INTEGER | Partida (`saves.id`) a que pertence.          |
+| `x`, `y`       | INTEGER | Tile da cidade.                               |
+| `owner_code`   | TEXT    | Facção dona.                                  |
+| `is_capital`   | INTEGER | 1 se a cidade é a capital de uma nação.       |
+| `population`   | INTEGER | População atual da cidade.                    |
+| `food`         | INTEGER | Estoque de comida da cidade.                  |
+| `manpower_cap` | INTEGER | Manpower que a cidade já concedeu (catraca).  |
+| `founded_turn` | INTEGER | Turno em que a cidade foi fundada (1 = capital). |
+
+### Tabela `settler_squads`
+
+Uma linha por **esquadrão de colonos** no mapa (ver seção 12).
+
+| Coluna            | Tipo    | Descrição                                  |
+|-------------------|---------|--------------------------------------------|
+| `id`              | INTEGER | Chave primária.                            |
+| `save_id`         | INTEGER | Partida (`saves.id`) a que pertence.       |
+| `owner_code`      | TEXT    | Facção dona.                               |
+| `x`, `y`          | INTEGER | Posição (célula) do esquadrão no mapa.     |
+| `count`           | INTEGER | Quantidade de colonos no esquadrão.        |
+| `created_turn`    | INTEGER | Turno em que foi criado (pronto no seguinte). |
+| `last_moved_turn` | INTEGER | Último turno em que se moveu.              |
+
+Criar um novo jogo gera o mapa, grava as províncias, cria as facções e semeia
+uma **cidade em cada capital**; carregar uma partida lê tudo do seu `save_id`.
+"Novo mapa" apaga e regenera só o mapa da partida atual (as facções são
+mantidas). Bancos de versões antigas (sem `save_id`) são migrados para uma
+partida "Partida recuperada"; saves anteriores à tabela `factions` ou às
+colunas de produção recebem os valores iniciais ao serem carregados. Saves
+anteriores ao sistema de cidades ganham cidades nas suas capitais ao serem
+carregados (sem o bônus de manpower — essas facções já o têm).
 
 ---
 
@@ -421,14 +458,18 @@ deixando o mapa livre.
   O texto de cada ação aparece como dica ao passar o mouse.
 - **Painel da província** — aparece ao **clicar numa província**; mostra dono,
   direcionamento, recurso, **clima** (zona, hemisfério, estação, avisos de
-  zona sísmica/vulcão) e a **produção por turno** (manpower, recurso local,
-  produção, pesquisa e cultura). Fecha no `✕` ou ao clicar no oceano.
+  zona sísmica/vulcão) e a **produção por turno**. Lista os **esquadrões** e os
+  **esquadrões de colonos** do tile e, se o tile for uma **cidade** sua, traz
+  as ações da cidade (Montar esquadrão, Ver cidade). Fecha no `✕` ou ao clicar
+  no oceano.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
   territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
   fica aberto por vez; o botão acende quando ativo.
 - **Painel da cidade** (direita) — aberto pelo botão **Ver cidade** do painel
-  da província; mostra a cidade em abas (estilo *Civilization*) — hoje a aba
-  **Inventário** (ver seção 11).
+  da província; só abre em **tiles de cidade**. Tem três abas (estilo
+  *Civilization*): **Cidade** (população, comida, manpower, influência),
+  **Produção** (fila de tropas e colonos) e **Inventário** (tropas guardadas)
+  — ver seção 12.
 - **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
   **turno atual**, a **data** e a **estação** de cada hemisfério (ver seção
   10), e traz o botão grande **Próximo turno** que avança o tempo (ver seção
@@ -460,21 +501,25 @@ O jogo avança por **turnos**, geridos em
 
 Cada facção recebe a produção das suas províncias somada aos seus valores:
 
-- **Manpower** += soma do manpower produzido pelas suas províncias.
 - **Pesquisa** += soma da pesquisa produzida pelas suas províncias.
 - **Cultura** += soma da cultura produzida pelas suas províncias.
 
 As **capitais já produzem o dobro** (regra da geração do mapa — seção 2),
 então esse bônus entra naturalmente na soma.
 
+Cada **cidade** processa o seu **ciclo de turno** — comida, crescimento da
+população e manpower (ver seção 12). O **manpower** que a facção ganha vem daí:
+1% da população nova quando uma cidade cresce.
+
 Cada facção também **paga a manutenção** do seu exército em **dinheiro** (ver
 seção 11): 25 por esquadrão + 10 por tropa, e ainda as tropas do inventário —
 mas tudo que está **num tile da própria facção custa metade**. O dinheiro
 nunca fica negativo: se o caixa não cobre a manutenção, ele só chega a 0.
 
-A **fila de recrutamento** de cada cidade avança: a **produção** da província
-é gasta na primeira tropa da fila e, quando concluída, a tropa entra no
-**inventário da cidade** (ver seção 11).
+A **fila de produção** de cada cidade avança: a **produção** da província é
+gasta no primeiro item da fila e, quando concluído, uma **tropa** entra no
+**inventário da cidade** ou um **colono** reforça um esquadrão de colonos no
+tile (ver seções 11 e 12).
 
 Por fim, cada esquadrão parado em **território da própria facção** recupera
 **5 de vida** (comandante e cada tropa), e **todos os esquadrões recuperam os
@@ -594,10 +639,10 @@ O exército é organizado em **esquadrões** (estilo *Rome: Total War*). Um
 esquadrão fica posicionado num tile do mapa, com um **ícone próprio** (⚔️ na
 cor da nação dona — vários esquadrões no mesmo tile mostram um contador).
 
-**Montar um esquadrão** — ao clicar numa **província sua**, o painel do
-território traz o botão **Montar esquadrão**. Custa **500 de dinheiro** e
-**1.000 de manpower** (o comandante). O esquadrão **fica pronto só no turno
-seguinte** ("Em preparação" até lá).
+**Montar um esquadrão** — ao clicar numa **cidade sua**, o painel do território
+traz o botão **Montar esquadrão**. Custa **500 de dinheiro** e **1.000 de
+manpower** (o comandante). O esquadrão **fica pronto só no turno seguinte**
+("Em preparação" até lá).
 
 **O comandante** — todo esquadrão nasce com um comandante:
 
@@ -658,10 +703,9 @@ destruído em batalha — é perdido de vez, como na vida real.
 barato que tropas em campanha. As tropas guardadas no **inventário** de uma
 cidade também pagam manutenção, e sempre pela metade (**5** cada).
 
-> *Provisório:* hoje a metade vale para **qualquer tile da facção**, porque o
-> jogo ainda não distingue **cidade** de território. Quando existir o sistema
-> de **cidades** (cidade + zona ao redor, estilo *Civilization*), o desconto
-> passará a valer só nas cidades.
+> *Provisório:* hoje a metade ainda vale para **qualquer tile da facção** —
+> quando o sistema de cidades amadurecer, o desconto tende a valer só nas
+> cidades e na sua zona de influência (ver seção 12).
 
 **Lista no tile** — o painel da província **sempre mostra a lista de
 esquadrões** daquele tile. Cada linha traz a força, as tropas, a vida e a
@@ -679,9 +723,9 @@ tile neutro) ou um **esquadrão inimigo** do mesmo tile. Ver *Batalha*.
 
 ### Recrutamento de tropas
 
-As tropas nascem pelo **recrutamento**. No painel de uma **cidade sua**, o
-botão **Recrutamento** substitui as informações do território pelo painel de
-recrutamento (com um botão **‹** para voltar). Hoje só há **infantaria**:
+As tropas nascem pelo **recrutamento**. A aba **Produção** do painel da cidade
+(ver seção 12) lista o que a cidade pode construir — hoje **infantaria** e
+**colonos**. Sobre a infantaria:
 
 | Tropa      | Força | Vida | Dinheiro | Manpower | Produção | Manutenção |
 |------------|-------|------|----------|----------|----------|------------|
@@ -708,9 +752,9 @@ A tropa pronta **não** vai direto para um esquadrão — fica guardada no
 só depois juntá-las a um esquadrão.
 
 O botão **Ver cidade** (no painel da província) abre um **painel da cidade** à
-direita, com abas no topo (estilo *Civilization*). Hoje existe a aba
-**Inventário**: mostra os **recursos** da cidade (zerados — o estoque chega com
-o sistema de produção) e as **tropas** guardadas.
+direita, com abas no topo (estilo *Civilization*) — **Cidade**, **Produção** e
+**Inventário** (ver seção 12). A aba **Inventário** mostra as **tropas**
+guardadas na cidade.
 
 Cada tropa do inventário tem um botão **Add ao esquadrão** e uma **caixa de
 seleção** para mover várias de uma vez. Ao enviar tropas a um esquadrão:
@@ -723,9 +767,8 @@ O esquadrão de destino precisa ter espaço (limite de tropas pelas estrelas).
 
 > **Planejado:** as tropas do inventário também **defenderão a cidade** quando
 > ela for atacada (hoje o inventário é só armazenamento — quem defende um tile
-> são os esquadrões estacionados nele); outras tropas além da infantaria; e a
-> **construção e produção** da cidade no painel **Ver cidade** (estilo
-> *Civilization*).
+> são os esquadrões estacionados nele); outras tropas além da infantaria; e as
+> **construções** nos tiles da zona de influência da cidade (ver seção 12).
 
 ### Batalha
 
@@ -826,7 +869,96 @@ esquadrão todo no level 5 é uma força de elite.
 
 ---
 
-## 12. Estrutura do código
+## 12. Cidades e colonos
+
+O sistema de cidades (estilo *Civilization*) está em
+[`src/game/cities.ts`](src/game/cities.ts). Uma **cidade** é um **tile
+especial**: cada nação começa com uma — a sua **capital** —, e novas cidades
+são **fundadas** por **colonos**.
+
+> **Implementado:** fundar cidades, população, comida, zona de influência e o
+> ciclo de turno (comida, crescimento, manpower). **Planejado:** as
+> **construções** (fazendas e outros edifícios nos tiles de influência).
+
+### A cidade
+
+Cada cidade tem **população** e um estoque de **comida**:
+
+- **Capitais** nascem com **1.000.000** de habitantes e **10** de comida, e
+  **produzem 10 de comida por turno** (mínimo — fazendas aumentarão isso).
+- **Cidades fundadas** nascem com **100 mil** de habitantes e **10** de comida
+  por colono do esquadrão; **ainda não produzem comida** (dependem de fazendas,
+  planejadas).
+- **Estoque de comida** — limitado: **200** numa capital, **100** numa cidade.
+
+### Comida e população (por turno)
+
+- **Consumo:** 1 de comida por turno a cada **100 mil** de habitantes (1 milhão
+  ⇒ 10 de comida).
+- A comida produzida entra no estoque; o consumo é pago do estoque.
+- **Crescimento:** se a produção supera o consumo, a população cresce **1% por
+  ponto de comida em excedente** (produz 15, consome 10 ⇒ +5%/turno).
+- **Fome:** se o estoque acaba e a comida não cobre o consumo, a cidade perde
+  **3% da população por turno** até a produção bastar — ou até a facção
+  resolver o problema.
+- **Penalidade de conexão:** uma cidade comum **sem caminho de tiles possuídos**
+  até outra cidade da facção paga **+30%** de comida no consumo. As capitais
+  nunca pagam essa penalidade.
+
+### Manpower (modelo Hearts of Iron)
+
+O manpower da facção vem **só das cidades**: cada cidade fornece **1% da sua
+população**. É uma **catraca** — quando a população cresce, o 1% novo é somado
+ao manpower da facção; quando a população encolhe, o manpower já concedido
+**não é perdido**, mas também **não volta a crescer** até a população
+ultrapassar o pico anterior. Gastar manpower (recrutar tropas/esquadrões) não
+o devolve: para repor, a população precisa **crescer**.
+
+### Zona de influência
+
+Toda cidade tem uma **zona de influência** ao seu redor: raio de **1 tile**
+para uma cidade comum e **2 tiles** para uma capital. É a área onde a facção
+poderá erguer **construções** que alimentam a cidade (planejado, estilo
+*Civilization*). Há uma **distância mínima de 2 tiles** entre cidades.
+
+### Colonos e esquadrão de colonos
+
+Para fundar uma cidade a facção precisa de um **colono**:
+
+- O colono é construído na **fila de produção** de uma cidade (aba **Produção**
+  do painel da cidade). Custa **100 mil de população + 10 de comida** daquela
+  cidade (cobrados ao enfileirar) e **200 de produção** (construído ao longo de
+  vários turnos). Cancelar a ordem devolve a população e a comida.
+- A fila é **única por cidade** — produzir tropas adia o colono e vice-versa.
+- Quando pronto, o colono vai para um **esquadrão de colonos** no tile da
+  cidade. Vários colonos podem ficar **no mesmo esquadrão**.
+
+O **esquadrão de colonos** é uma unidade própria — **sem comandante e sem
+combate**. Move-se pelo mapa **1 tile por turno** (2 turnos para sair de tile
+gelado), só por território seu ou neutro, e fica **pronto no turno seguinte**
+ao da criação. Se um **esquadrão militar inimigo entra no seu tile**, o
+esquadrão de colonos é **destruído** (civis não resistem a tropas — regra do
+*Civilization V*).
+
+### Fundar uma cidade
+
+Com um esquadrão de colonos pronto num tile válido, o painel da província traz
+o botão **🏛️ Fundar cidade**. O tile precisa estar a **pelo menos 2 tiles**
+(distância de Chebyshev) de toda cidade existente. Ao fundar:
+
+- o esquadrão de colonos é **consumido**;
+- nasce uma cidade com **100 mil de população e 10 de comida por colono**;
+- a cidade concede de imediato **1% da população** como manpower à facção;
+- se o tile era neutro, ele é **tomado** pela facção.
+
+> **Gaps futuros:** sistema de **revoltas** quando uma cidade não consegue
+> comida; **custo de lealdade** das cidades distantes; sistema de **leis** para
+> definir quanto da população pode virar manpower; **construções** (fazendas
+> etc.) na zona de influência.
+
+---
+
+## 13. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -848,6 +980,7 @@ apps/desktop/src/
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
     ├── squads.ts         esquadrões, tropas, recrutamento e inventário
+    ├── cities.ts         cidades, colonos e fundação de cidades
     ├── battle.ts         resolução de combate (dano, debuffs de ambiente)
     ├── map-generator.ts  geração procedural do mapa
     ├── world.ts          esquema SQLite, persistência e avanço de turno
@@ -856,29 +989,32 @@ apps/desktop/src/
 
 ---
 
-## 13. Roteiro (próximos passos)
+## 14. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
 2. ~~**Turnos** — botão "Próximo turno" que avança o tempo.~~
    **Implementado** (seção 9): turnos semanais a partir de 01/01/1980.
-3. **Economia** — *parcial*: a cada turno as facções já recebem **manpower**,
-   **pesquisa** e **cultura** das suas províncias (seção 9). Falta dar uma
-   fonte de produção ao **dinheiro** e à **influência**, e usar "recurso local"
-   e "produção industrial" (efeito dos recursos, construção de tropas/edifícios).
+3. **Economia** — *parcial*: a cada turno as facções recebem **pesquisa** e
+   **cultura** das suas províncias e **manpower** das cidades (seções 9 e 12).
+   Falta dar uma fonte de produção ao **dinheiro** e à **influência**, e usar
+   "recurso local" (efeito dos recursos).
 4. **Eventos** — terremotos, erupções e eventos sazonais sobre o mapa de clima
    e placas tectônicas (seção 10), com **buffs e debuffs**.
 5. ~~**Esquadrões e batalha**~~ **Implementado** (seção 11): montar, mover e
    dissolver esquadrões, **recrutar tropas**, **atacar** territórios e
    esquadrões e **tomar** territórios neutros (ocupar ou devastar).
-6. **Construções** — edifícios nos tiles, com bônus de defesa e buffs/debuffs
-   que entram na conta da batalha (seção 11).
-7. **Conquista e defesa entre facções** — tomar territórios de outras nações;
+6. ~~**Cidades**~~ **Implementado** (seção 12): fundar cidades com colonos,
+   população, comida, zona de influência e ciclo de turno.
+7. **Construções** — edifícios nos tiles da zona de influência das cidades
+   (fazendas que produzem comida e outros), com bônus de defesa e
+   buffs/debuffs que entram na conta da batalha (seções 11 e 12).
+8. **Conquista e defesa entre facções** — tomar territórios de outras nações;
    o contra-ataque do defensor; e a **defesa das cidades** — hoje as tropas no
    **inventário** ainda *não* defendem o tile (só os esquadrões estacionados),
    e isso vai mudar (ver seção 11).
-8. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno;
+9. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno;
    só então uma cidade do jogador chega a ser atacada.
-9. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
+10. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
    destrava mover-se por território de outras facções e o combate entre
    esquadrões (hoje só se batalha contra territórios neutros).
