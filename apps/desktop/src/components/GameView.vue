@@ -6,8 +6,10 @@ import { GRID, CONTINENT_NAMES } from "../game/map-generator";
 import { NATIONS, type Nation, flagSeed } from "../game/nations";
 import { ALIGNMENTS, ALIGNMENT_LIST } from "../game/alignments";
 import { resourceInfo } from "../game/resources";
+import { FACTION_STATS, TERRITORY_STATS, type FactionState } from "../game/economy";
 import {
   loadMap,
+  loadFactions,
   regenerateMap,
   getSave,
   type Province,
@@ -26,6 +28,7 @@ const NEUTRAL_COLOR = "#39414f";
 const game = ref<GameSave | null>(null);
 const saveName = ref("");
 const provinces = ref<Province[]>([]);
+const factions = ref<FactionState[]>([]);
 const loading = ref(true);
 const err = ref("");
 const busy = ref(false);
@@ -54,23 +57,50 @@ function nationOf(code: string | null): Nation | null {
 }
 const playerNation = computed(() => nationOf(game.value?.playerCode ?? null));
 
+/** A facção do jogador (dinheiro, influência, manpower, pesquisa). */
+const playerFaction = computed<FactionState | null>(
+  () => factions.value.find((f) => f.code === game.value?.playerCode) ?? null,
+);
+
+/** Formata um número grande com separador de milhar (pt-BR). */
+function fmt(n: number): string {
+  return n.toLocaleString("pt-BR");
+}
+
 // ===== Zoom e navegação do mapa =====
 const MIN_SCALE = 1;
 const MAX_SCALE = 7;
 const svgEl = ref<SVGSVGElement | null>(null);
-const view = ref({ x: 0, y: 0, scale: 1 });
+
+/**
+ * Borda de oceano ao redor da grade de continentes. Esse "respiro" de água
+ * empurra a terra para longe das bordas da tela, então os painéis da HUD
+ * (barra superior, barra lateral) ficam sobre o mar — e dá folga para
+ * arrastar o mapa e tirar qualquer província de trás de um painel.
+ */
+const MAP_PAD = 7;
+const WORLD = {
+  x: -MAP_PAD,
+  y: -MAP_PAD,
+  cols: GRID.cols + MAP_PAD * 2,
+  rows: GRID.rows + MAP_PAD * 2,
+};
+
+const view = ref({ x: WORLD.x, y: WORLD.y, scale: 1 });
 
 const viewBox = computed(() => {
-  const w = GRID.cols / view.value.scale;
-  const h = GRID.rows / view.value.scale;
+  const w = WORLD.cols / view.value.scale;
+  const h = WORLD.rows / view.value.scale;
   return `${view.value.x} ${view.value.y} ${w} ${h}`;
 });
 
 function clampView() {
-  const w = GRID.cols / view.value.scale;
-  const h = GRID.rows / view.value.scale;
-  view.value.x = Math.min(Math.max(view.value.x, 0), Math.max(0, GRID.cols - w));
-  view.value.y = Math.min(Math.max(view.value.y, 0), Math.max(0, GRID.rows - h));
+  const w = WORLD.cols / view.value.scale;
+  const h = WORLD.rows / view.value.scale;
+  const maxX = Math.max(WORLD.x, WORLD.x + WORLD.cols - w);
+  const maxY = Math.max(WORLD.y, WORLD.y + WORLD.rows - h);
+  view.value.x = Math.min(Math.max(view.value.x, WORLD.x), maxX);
+  view.value.y = Math.min(Math.max(view.value.y, WORLD.y), maxY);
 }
 
 /** Converte coordenada de tela para coordenada do mapa (unidades do viewBox). */
@@ -89,13 +119,13 @@ function screenToSvg(clientX: number, clientY: number) {
 function applyZoom(newScale: number, anchor: { x: number; y: number }) {
   const s = Math.min(Math.max(newScale, MIN_SCALE), MAX_SCALE);
   if (s === view.value.scale) return;
-  const oldW = GRID.cols / view.value.scale;
-  const oldH = GRID.rows / view.value.scale;
+  const oldW = WORLD.cols / view.value.scale;
+  const oldH = WORLD.rows / view.value.scale;
   const fx = (anchor.x - view.value.x) / oldW;
   const fy = (anchor.y - view.value.y) / oldH;
   view.value.scale = s;
-  view.value.x = anchor.x - fx * (GRID.cols / s);
-  view.value.y = anchor.y - fy * (GRID.rows / s);
+  view.value.x = anchor.x - fx * (WORLD.cols / s);
+  view.value.y = anchor.y - fy * (WORLD.rows / s);
   clampView();
 }
 
@@ -104,17 +134,6 @@ function onWheel(e: WheelEvent) {
     view.value.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2),
     screenToSvg(e.clientX, e.clientY),
   );
-}
-
-function zoomButton(factor: number) {
-  applyZoom(view.value.scale * factor, {
-    x: view.value.x + GRID.cols / view.value.scale / 2,
-    y: view.value.y + GRID.rows / view.value.scale / 2,
-  });
-}
-
-function resetView() {
-  view.value = { x: 0, y: 0, scale: 1 };
 }
 
 // Pan — arrastar o mapa com o mouse.
@@ -168,6 +187,7 @@ async function load() {
     game.value = save;
     saveName.value = save.name;
     provinces.value = await loadMap(props.saveId);
+    factions.value = await loadFactions(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -342,8 +362,10 @@ function provinceFill(p: Province): string {
       @mousedown="onPanStart"
     >
       <rect
-        :width="GRID.cols"
-        :height="GRID.rows"
+        :x="WORLD.x"
+        :y="WORLD.y"
+        :width="WORLD.cols"
+        :height="WORLD.rows"
         :fill="DEEP_OCEAN"
         @click="onOceanClick"
       />
@@ -432,32 +454,40 @@ function provinceFill(p: Province): string {
 
     <!-- HUD -->
     <div v-if="!loading" class="hud">
-      <!-- Barra superior -->
+      <!-- Barra superior: facção do jogador, valores e modo do mapa -->
       <header class="topbar">
-        <div class="crest">
-          <span class="crest-icon">⚔</span>
-          <span class="crest-text">
-            <span class="crest-title">WORLD WAR</span>
-            <span class="crest-sub">Grande Estratégia</span>
-          </span>
-        </div>
-
         <div
-          v-if="playerNation"
-          class="player-chip"
+          v-if="playerNation && playerFaction"
+          class="faction"
           :style="{ '--pc': playerNation.color }"
-          :title="'Você comanda: ' + playerNation.name"
         >
           <Flag
             :seed="flagSeed(playerNation)"
             :color="playerNation.color"
-            :size="28"
+            :size="34"
           />
-          <span class="player-text">
-            <span class="player-label">Sua nação</span>
-            <span class="player-name">{{ playerNation.name }}</span>
-          </span>
+          <div class="fb-id">
+            <span class="fb-label">Sua nação</span>
+            <span class="fb-name">{{ playerNation.name }}</span>
+          </div>
+          <div class="fb-sep"></div>
+          <div
+            v-for="s in FACTION_STATS"
+            :key="s.key"
+            class="fb-stat"
+            :title="s.label"
+          >
+            <span class="fb-icon">{{ s.icon }}</span>
+            <span class="fb-text">
+              <span class="fb-val" :style="{ color: s.color }">
+                {{ fmt(playerFaction[s.key]) }}
+              </span>
+              <span class="fb-stat-label">{{ s.label }}</span>
+            </span>
+          </div>
         </div>
+
+        <div class="fb-sep"></div>
 
         <div class="seg">
           <button
@@ -474,51 +504,55 @@ function provinceFill(p: Province): string {
           </button>
         </div>
 
-        <div class="tools">
-          <button
-            class="tool"
-            :class="{ on: activePanel === 'nations' }"
-            @click="togglePanel('nations')"
-          >
-            🏴 Nações
-          </button>
-          <button
-            class="tool"
-            :class="{ on: activePanel === 'alignments' }"
-            @click="togglePanel('alignments')"
-          >
-            🎖️ Direcionamentos
-          </button>
-        </div>
+        <div class="spacer"></div>
 
         <div class="status">
           <span v-if="hovered" class="status-name">{{ hovered.name }}</span>
           <span v-else class="status-dim">{{ provinces.length }} províncias</span>
         </div>
 
-        <div class="spacer"></div>
-
         <span class="save-tag" :title="'Partida: ' + saveName">
           📌 {{ saveName }}
         </span>
-        <button class="tool" :disabled="busy" @click="newMap">
-          {{ busy ? "Gerando..." : "↻ Novo mapa" }}
-        </button>
-        <button class="tool" @click="openSaveDialog">💾 Salvar jogo</button>
-        <button class="tool" @click="requestExit">⏏ Menu</button>
-        <button class="tool icon" title="Tela cheia" @click="toggleFullscreen">
-          ⛶
-        </button>
       </header>
 
       <p v-if="err" class="hud-error">ERRO: {{ err }}</p>
 
-      <!-- Controle de zoom -->
-      <div class="zoom-ctl">
-        <button title="Aproximar" @click="zoomButton(1.4)">＋</button>
-        <button title="Afastar" @click="zoomButton(1 / 1.4)">−</button>
-        <button title="Visão geral" @click="resetView">⤢</button>
-      </div>
+      <!-- Barra lateral: ações do jogo, só ícones -->
+      <nav class="sidebar">
+        <button
+          class="side-btn"
+          :class="{ on: activePanel === 'nations' }"
+          title="Nações"
+          @click="togglePanel('nations')"
+        >
+          🏴
+        </button>
+        <button
+          class="side-btn"
+          :class="{ on: activePanel === 'alignments' }"
+          title="Direcionamentos"
+          @click="togglePanel('alignments')"
+        >
+          🎖️
+        </button>
+        <div class="side-div"></div>
+        <button
+          class="side-btn"
+          :disabled="busy"
+          :title="busy ? 'Gerando...' : 'Novo mapa'"
+          @click="newMap"
+        >
+          ↻
+        </button>
+        <button class="side-btn" title="Salvar jogo" @click="openSaveDialog">
+          💾
+        </button>
+        <button class="side-btn" title="Menu" @click="requestExit">⏏</button>
+        <button class="side-btn" title="Tela cheia" @click="toggleFullscreen">
+          ⛶
+        </button>
+      </nav>
 
       <!-- Painel da província (contextual, ao clicar) -->
       <Transition name="rise">
@@ -586,6 +620,29 @@ function provinceFill(p: Province): string {
           <p v-if="selectedResource" class="effect">
             {{ selectedResource.effect }}
           </p>
+
+          <div class="prod-head">Produção por turno</div>
+          <div class="prod-grid">
+            <div
+              v-for="s in TERRITORY_STATS"
+              :key="s.key"
+              class="prod-cell"
+            >
+              <span class="prod-icon">
+                {{
+                  s.key === "resourceProduction" && selectedResource
+                    ? selectedResource.icon
+                    : s.icon
+                }}
+              </span>
+              <span class="prod-info">
+                <span class="prod-val" :style="{ color: s.color }">
+                  +{{ selected[s.key] }}
+                </span>
+                <span class="prod-label">{{ s.label }}</span>
+              </span>
+            </div>
+          </div>
         </section>
       </Transition>
 
@@ -770,70 +827,59 @@ function provinceFill(p: Province): string {
   border-bottom: 1px solid #0c0f16;
   box-shadow: 0 2px 0 rgba(232, 184, 74, 0.25), 0 4px 14px rgba(0, 0, 0, 0.5);
 }
-.crest {
+/* Facção do jogador (bandeira + valores) na barra superior */
+.faction {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding-right: 14px;
-  border-right: 1px solid var(--line);
+  gap: 12px;
 }
-.crest-icon {
-  font-size: 20px;
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(180deg, #3a4658 0%, #20283a 100%);
-  border: 1px solid var(--gold);
-  border-radius: 8px;
-}
-.crest-text {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.15;
-}
-.crest-title {
-  font-weight: 800;
-  letter-spacing: 1.5px;
-  color: var(--gold);
-  font-size: 0.95rem;
-}
-.crest-sub {
-  font-size: 0.68rem;
-  color: #8a92a0;
-  letter-spacing: 0.5px;
-}
-
-/* Chip da nação do jogador */
-.player-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 11px 5px 7px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--pc);
-  border-radius: 8px;
-}
-.player-text {
+.fb-id {
   display: flex;
   flex-direction: column;
   line-height: 1.2;
-  max-width: 150px;
+  max-width: 170px;
 }
-.player-label {
-  font-size: 0.6rem;
+.fb-label {
+  font-size: 0.58rem;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: #8a92a0;
 }
-.player-name {
-  font-size: 0.82rem;
+.fb-name {
+  font-size: 0.86rem;
   font-weight: 700;
   color: #fff;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.fb-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+}
+.fb-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fb-icon {
+  font-size: 1.15rem;
+}
+.fb-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.fb-val {
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+.fb-stat-label {
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8a92a0;
 }
 
 .seg {
@@ -849,13 +895,10 @@ function provinceFill(p: Province): string {
 .seg button + button {
   border-left: 1px solid var(--line);
 }
-.tools {
-  display: flex;
-  gap: 7px;
-}
 .status {
   min-width: 110px;
   padding: 0 6px;
+  text-align: right;
 }
 .status-name {
   font-weight: 700;
@@ -889,22 +932,33 @@ function provinceFill(p: Province): string {
   margin-left: 4px;
 }
 
-/* ===== Controle de zoom ===== */
-.zoom-ctl {
+/* ===== Barra lateral (ações do jogo — só ícones) ===== */
+.sidebar {
   position: absolute;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 68px;
+  left: 14px;
   display: flex;
+  flex-direction: column;
   gap: 6px;
+  padding: 7px;
+  background: linear-gradient(180deg, var(--panel-a) 0%, var(--panel-b) 100%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
 }
-.zoom-ctl button {
-  width: 38px;
-  height: 38px;
+.side-btn {
+  width: 42px;
+  height: 42px;
   padding: 0;
-  font-size: 1.1rem;
   display: grid;
   place-items: center;
+  border-radius: 10px;
+  font-size: 1.15rem;
+}
+.side-div {
+  height: 1px;
+  background: var(--line);
+  margin: 2px 5px;
 }
 
 /* ===== Cartões / painéis ===== */
@@ -951,7 +1005,7 @@ function provinceFill(p: Province): string {
 }
 .province {
   position: absolute;
-  left: 14px;
+  left: 70px;
   bottom: 14px;
   width: 320px;
 }
@@ -1041,6 +1095,47 @@ function provinceFill(p: Province): string {
   color: #8a92a0;
   font-size: 0.8rem;
   margin: 9px 13px 14px;
+}
+
+/* Produção do território */
+.prod-head {
+  margin: 4px 13px 0;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: #8a92a0;
+}
+.prod-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin: 8px 13px 14px;
+}
+.prod-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+.prod-icon {
+  font-size: 1.2rem;
+}
+.prod-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.prod-val {
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+.prod-label {
+  font-size: 0.6rem;
+  color: #8a92a0;
 }
 .panel {
   position: absolute;

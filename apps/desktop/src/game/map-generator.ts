@@ -1,4 +1,5 @@
 import { ResourceType } from './enums';
+import { TerritoryProduction } from './economy';
 
 /**
  * Gerador procedural do mapa-múndi (vetorial estilizado).
@@ -17,7 +18,7 @@ export interface Cell {
 }
 
 /** Uma província gerada (1 célula de terra). */
-export interface GeneratedProvince {
+export interface GeneratedProvince extends TerritoryProduction {
   x: number;
   y: number;
   continent: string;
@@ -105,6 +106,23 @@ const NAME_ROOT = [
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
+/** Inteiro aleatório entre `min` e `max` (ambos inclusivos). */
+function randInt(min: number, max: number): number {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+/**
+ * Sorteia a produção por turno de uma província. As capitais, por serem o
+ * coração da nação, produzem o dobro de cada valor.
+ */
+function rollProduction(isCapital: boolean): TerritoryProduction {
+  const m = isCapital ? 2 : 1;
+  return {
+    manpowerProduction: randInt(8, 30) * m,
+    resourceProduction: randInt(4, 16) * m,
+    production: randInt(5, 22) * m,
+    researchProduction: randInt(1, 7) * m,
+  };
+}
 function shuffle<T>(arr: T[]): T[] {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -157,6 +175,10 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
         resource: null as any,
         ownerCode: null,
         isCapital: false,
+        manpowerProduction: 0,
+        resourceProduction: 0,
+        production: 0,
+        researchProduction: 0,
       });
     }
   }
@@ -240,6 +262,9 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
       pool[0].isCapital = true;
     }
   }
+
+  // 5. Sorteia a produção por turno de cada província (capitais já marcadas).
+  for (const p of provinces) Object.assign(p, rollProduction(p.isCapital));
 
   return { cols: GRID.cols, rows: GRID.rows, provinces };
 }

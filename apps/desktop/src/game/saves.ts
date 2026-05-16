@@ -69,10 +69,11 @@ export async function listSaves(): Promise<SaveSummary[]> {
   });
 }
 
-/** Apaga uma partida e todas as suas províncias. */
+/** Apaga uma partida, as suas províncias e as suas facções. */
 export async function deleteSave(id: number): Promise<void> {
   const db = await getDb();
   await db.execute('DELETE FROM provinces WHERE save_id = ?', [id]);
+  await db.execute('DELETE FROM factions WHERE save_id = ?', [id]);
   await db.execute('DELETE FROM saves WHERE id = ?', [id]);
 }
 

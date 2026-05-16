@@ -16,7 +16,9 @@ expandir território, gerir economia, fazer diplomacia e vencer as outras
 nações — todas controladas por IA.
 
 Estado atual: o **mapa-múndi** com províncias, nações e direcionamentos
-políticos. Turnos, economia, IA e diplomacia ainda serão implementados.
+políticos; cada facção tem os seus **quatro valores** e cada território a sua
+**produção por turno** (ainda estáticos). Turnos, economia dinâmica, IA e
+diplomacia ainda serão implementados.
 
 ---
 
@@ -77,6 +79,25 @@ são sempre visíveis** (facilita achar petróleo, urânio, etc.); no modo
 
 > **Planejado:** efeito dos recursos na economia/produção de cada nação.
 
+### Produção do território
+
+Além do recurso, **cada província produz quatro valores por turno**
+(definidos em [`src/game/economy.ts`](src/game/economy.ts), sorteados na
+geração do mapa):
+
+| Valor               | Descrição                                              |
+|---------------------|--------------------------------------------------------|
+| Manpower / turno    | Quanto manpower (população mobilizável) a província gera. |
+| Recurso local       | Quanto do recurso da província é produzido.            |
+| Produção            | Produção industrial estilo *Civilization* (futuras tropas/construções). |
+| Pesquisa / turno    | Pontos de pesquisa gerados pela província.             |
+
+As **capitais produzem o dobro** de cada valor. Os números são sorteados a
+cada "Novo mapa" e ficam visíveis no painel da província.
+
+> **Planejado:** a cada turno, somar a produção das províncias de uma nação
+> aos valores da facção (ver seção 3). Hoje a produção é apenas estática.
+
 ---
 
 ## 3. As nações (facções)
@@ -103,6 +124,27 @@ Todo o resto do mundo começa **neutro**.
 
 > O direcionamento de cada nação acima é uma **proposta inicial** — é só um
 > campo em `nations.ts` e fácil de ajustar.
+
+### Valores da facção
+
+Toda facção (as 13 nações fixas **e** a nação personalizada) acumula **quatro
+valores**, definidos em [`src/game/economy.ts`](src/game/economy.ts) e
+persistidos na tabela `factions`:
+
+| Valor               | Descrição                                          |
+|---------------------|----------------------------------------------------|
+| Dinheiro            | Tesouro nacional.                                  |
+| Influência          | Influência política.                               |
+| Manpower            | População mobilizável disponível.                  |
+| Pontos de pesquisa  | Pontos de pesquisa acumulados.                     |
+
+Toda facção começa a partida com os **mesmos valores iniciais**
+(`STARTING_FACTION`): 1.000 de dinheiro, 100 de influência, 10.000 de
+manpower e 0 de pesquisa. Os valores da facção do jogador ficam visíveis na
+**barra da facção** da HUD (ver seção 8).
+
+> **Planejado:** os valores evoluem a cada turno a partir da produção das
+> províncias da nação (ver seção 2). Hoje são estoques estáticos.
 
 ### Bandeiras
 
@@ -228,11 +270,32 @@ Cada província pertence a uma partida (`save_id`).
 | `resource`   | TEXT    | Recurso (`ResourceType`).                  |
 | `owner_code` | TEXT    | Código da nação dona, ou `NULL` se neutra. |
 | `is_capital` | INTEGER | 1 se é a capital de uma nação.             |
+| `manpower_prod` | INTEGER | Manpower produzido por turno.           |
+| `resource_prod` | INTEGER | Recurso local produzido por turno.      |
+| `production`    | INTEGER | Produção industrial por turno.          |
+| `research_prod` | INTEGER | Pontos de pesquisa produzidos por turno.|
 
-Criar um novo jogo gera o mapa e grava as províncias daquela partida; carregar
-uma partida lê as províncias do seu `save_id`. "Novo mapa" apaga e regenera só
-o mapa da partida atual. Bancos de versões antigas (sem `save_id`) são migrados
-para uma partida "Partida recuperada".
+### Tabela `factions`
+
+Uma linha por **facção em cada partida** (as 13 nações fixas e, se houver, a
+personalizada).
+
+| Coluna            | Tipo    | Descrição                              |
+|-------------------|---------|----------------------------------------|
+| `id`              | INTEGER | Chave primária.                        |
+| `save_id`         | INTEGER | Partida (`saves.id`) a que pertence.   |
+| `code`            | TEXT    | Código da nação (`PLR` se personalizada). |
+| `money`           | INTEGER | Dinheiro.                              |
+| `influence`       | INTEGER | Influência.                            |
+| `manpower`        | INTEGER | Manpower.                              |
+| `research_points` | INTEGER | Pontos de pesquisa.                    |
+
+Criar um novo jogo gera o mapa, grava as províncias e cria as facções daquela
+partida; carregar uma partida lê províncias e facções do seu `save_id`. "Novo
+mapa" apaga e regenera só o mapa da partida atual (as facções são mantidas).
+Bancos de versões antigas (sem `save_id`) são migrados para uma partida
+"Partida recuperada"; saves anteriores à tabela `factions` ou às colunas de
+produção recebem os valores iniciais ao serem carregados.
 
 ---
 
@@ -243,21 +306,26 @@ Hearts of Iron): o **mapa ocupa a tela inteira** como fundo e a HUD são
 **painéis sobrepostos** que **abrem por botão** — por padrão ficam fechados,
 deixando o mapa livre.
 
-- **Janela** — abre **maximizada**; o botão `⛶` na barra superior alterna a
-  **tela cheia** de verdade.
-- **Barra superior** — brasão/título, alternância de visão (Político /
-  Recursos), os botões que abrem os painéis, a província sob o cursor e os
-  controles ("Novo mapa", "Salvar jogo", "Menu", tela cheia).
-- **Painel da província** (canto inferior esquerdo) — aparece ao **clicar numa
-  província**; mostra dono, direcionamento e recurso. Fecha no `✕` ou ao
-  clicar no oceano.
+- **Janela** — abre **maximizada**; o botão **Tela cheia** da barra lateral
+  alterna a **tela cheia** de verdade.
+- **Barra superior** (sempre visível) — à esquerda, a **bandeira e o nome** da
+  nação do jogador seguidos dos seus **quatro valores** (dinheiro, influência,
+  manpower e pesquisa — ver seção 3); depois a alternância de visão do mapa
+  (Político / Recursos); à direita, a província sob o cursor e o nome da
+  partida. Não traz o nome do jogo (já aparece no menu inicial).
+- **Barra lateral** (canto superior esquerdo) — uma lista vertical de botões
+  arredondados com as ações do jogo: **Nações** e **Direcionamentos** (abrem
+  os painéis), **Novo mapa**, **Salvar jogo**, **Menu** e **Tela cheia**.
+- **Painel da província** — aparece ao **clicar numa província**; mostra dono,
+  direcionamento, recurso e a **produção por turno** (manpower, recurso local,
+  produção e pesquisa). Fecha no `✕` ou ao clicar no oceano.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
   territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
   fica aberto por vez; o botão acende quando ativo.
 
 - **Navegação do mapa** — a roda do mouse dá **zoom** (centrado no cursor) e
-  **arrastar** move o mapa. Os botões `＋` / `−` / `⤢` no rodapé controlam o
-  zoom (`⤢` volta à visão geral).
+  **arrastar** move o mapa. Não há botões de zoom: a navegação é toda pelo
+  mouse, deixando o rodapé livre.
 
 Regra de ouro: nenhum painel fica na frente do mapa sem o jogador ter pedido.
 
@@ -277,10 +345,11 @@ apps/desktop/src/
     ├── enums.ts          ResourceType
     ├── flags.ts          geração do padrão das bandeiras
     ├── resources.ts      catálogo de recursos
+    ├── economy.ts        valores da facção e produção do território
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
     ├── map-generator.ts  geração procedural do mapa
-    ├── world.ts          esquema SQLite e persistência do mapa
+    ├── world.ts          esquema SQLite e persistência de mapa e facções
     └── saves.ts          gestão das partidas salvas
 ```
 
@@ -291,7 +360,10 @@ apps/desktop/src/
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
 2. **Turnos** — botão "Próximo turno" que avança o tempo.
-3. **Economia** — tesouro nacional; províncias geram renda/recursos por turno.
+3. **Economia** — *parcial*: os valores da facção (dinheiro, influência,
+   manpower, pesquisa) e a produção por turno de cada território já existem
+   (seções 2 e 3), mas ainda são **estáticos**. Falta o turno somar a produção
+   das províncias aos valores da facção.
 4. **Expansão** — conquistar províncias neutras e vizinhas.
 5. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
 6. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).

@@ -5,12 +5,17 @@ import {
   CapitalSeed,
   continentCells,
 } from './map-generator';
-import { NATIONS, Nation, CUSTOM_NATION_CODE } from './nations';
+import { NATIONS, NATION_CODES, Nation, CUSTOM_NATION_CODE } from './nations';
 import { AlignmentId } from './alignments';
 import { ResourceType } from './enums';
+import {
+  FactionState,
+  STARTING_FACTION,
+  TerritoryProduction,
+} from './economy';
 
 /** Uma província do mapa já persistida (1 célula de terra, com id do banco). */
-export interface Province {
+export interface Province extends TerritoryProduction {
   id: number;
   x: number;
   y: number;
@@ -30,6 +35,18 @@ interface ProvinceRow {
   resource: string;
   owner_code: string | null;
   is_capital: number;
+  manpower_prod: number;
+  resource_prod: number;
+  production: number;
+  research_prod: number;
+}
+
+interface FactionRow {
+  code: string;
+  money: number;
+  influence: number;
+  manpower: number;
+  research_points: number;
 }
 
 interface SaveRow {
@@ -109,21 +126,38 @@ export async function ensureSchema(): Promise<void> {
     }
   }
 
+  // Tabela das facções: uma linha por nação em cada partida.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS factions (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id         INTEGER NOT NULL,
+      code            TEXT    NOT NULL,
+      money           INTEGER NOT NULL,
+      influence       INTEGER NOT NULL,
+      manpower        INTEGER NOT NULL,
+      research_points INTEGER NOT NULL
+    )
+  `);
+
   const cols = await db.select<{ name: string }[]>(
     'PRAGMA table_info(provinces)',
   );
   if (cols.length === 0) {
     await db.execute(`
       CREATE TABLE provinces (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        save_id     INTEGER NOT NULL,
-        x           INTEGER NOT NULL,
-        y           INTEGER NOT NULL,
-        continent   TEXT    NOT NULL,
-        name        TEXT    NOT NULL,
-        resource    TEXT    NOT NULL,
-        owner_code  TEXT,
-        is_capital  INTEGER NOT NULL DEFAULT 0
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        save_id       INTEGER NOT NULL,
+        x             INTEGER NOT NULL,
+        y             INTEGER NOT NULL,
+        continent     TEXT    NOT NULL,
+        name          TEXT    NOT NULL,
+        resource      TEXT    NOT NULL,
+        owner_code    TEXT,
+        is_capital    INTEGER NOT NULL DEFAULT 0,
+        manpower_prod INTEGER NOT NULL DEFAULT 0,
+        resource_prod INTEGER NOT NULL DEFAULT 0,
+        production    INTEGER NOT NULL DEFAULT 0,
+        research_prod INTEGER NOT NULL DEFAULT 0
       )
     `);
   } else if (!cols.some((c) => c.name === 'save_id')) {
@@ -143,6 +177,24 @@ export async function ensureSchema(): Promise<void> {
       ]);
     }
   }
+
+  // Migração: adiciona as colunas de produção em províncias antigas.
+  const provCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(provinces)',
+  );
+  const haveProvCol = new Set(provCols.map((c) => c.name));
+  for (const col of [
+    'manpower_prod',
+    'resource_prod',
+    'production',
+    'research_prod',
+  ]) {
+    if (!haveProvCol.has(col)) {
+      await db.execute(
+        `ALTER TABLE provinces ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+  }
 }
 
 function rowToProvince(r: ProvinceRow): Province {
@@ -155,6 +207,20 @@ function rowToProvince(r: ProvinceRow): Province {
     resource: r.resource as ResourceType,
     ownerCode: r.owner_code,
     isCapital: r.is_capital === 1,
+    manpowerProduction: r.manpower_prod,
+    resourceProduction: r.resource_prod,
+    production: r.production,
+    researchProduction: r.research_prod,
+  };
+}
+
+function rowToFaction(r: FactionRow): FactionState {
+  return {
+    code: r.code,
+    money: r.money,
+    influence: r.influence,
+    manpower: r.manpower,
+    researchPoints: r.research_points,
   };
 }
 
@@ -182,14 +248,44 @@ async function insertProvinces(
   try {
     for (const p of provinces) {
       await db.execute(
-        'INSERT INTO provinces (save_id, x, y, continent, name, resource, owner_code, is_capital) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [saveId, p.x, p.y, p.continent, p.name, p.resource, p.ownerCode, p.isCapital ? 1 : 0],
+        `INSERT INTO provinces
+           (save_id, x, y, continent, name, resource, owner_code, is_capital,
+            manpower_prod, resource_prod, production, research_prod)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          saveId,
+          p.x,
+          p.y,
+          p.continent,
+          p.name,
+          p.resource,
+          p.ownerCode,
+          p.isCapital ? 1 : 0,
+          p.manpowerProduction,
+          p.resourceProduction,
+          p.production,
+          p.researchProduction,
+        ],
       );
     }
     await db.execute('COMMIT');
   } catch (e) {
     await db.execute('ROLLBACK');
     throw e;
+  }
+}
+
+/** Cria as facções de uma partida, todas com os valores iniciais padrão. */
+async function insertFactions(saveId: number, codes: string[]): Promise<void> {
+  const db = await getDb();
+  const s = STARTING_FACTION;
+  for (const code of codes) {
+    await db.execute(
+      `INSERT INTO factions
+         (save_id, code, money, influence, manpower, research_points)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [saveId, code, s.money, s.influence, s.manpower, s.researchPoints],
+    );
   }
 }
 
@@ -265,6 +361,8 @@ export async function createGame(
   if (saveId == null) throw new Error('Falha ao criar a partida.');
 
   await insertProvinces(saveId, generateMap(buildSeeds(customContinent)).provinces);
+  const codes = isCustom ? [...NATION_CODES, CUSTOM_NATION_CODE] : NATION_CODES;
+  await insertFactions(saveId, codes);
   return saveId;
 }
 
@@ -291,6 +389,33 @@ export async function getSave(saveId: number): Promise<GameSave> {
 export async function loadMap(saveId: number): Promise<Province[]> {
   await ensureSchema();
   return readProvinces(saveId);
+}
+
+/**
+ * Carrega as facções de uma partida. Partidas antigas (criadas antes da
+ * tabela `factions`) recebem aqui as suas facções com os valores iniciais.
+ */
+export async function loadFactions(saveId: number): Promise<FactionState[]> {
+  await ensureSchema();
+  const db = await getDb();
+  const save = await getSave(saveId);
+  const expected = save.customNation
+    ? [...NATION_CODES, CUSTOM_NATION_CODE]
+    : NATION_CODES;
+
+  const existing = await db.select<{ code: string }[]>(
+    'SELECT code FROM factions WHERE save_id = ?',
+    [saveId],
+  );
+  const have = new Set(existing.map((r) => r.code));
+  const missing = expected.filter((c) => !have.has(c));
+  if (missing.length > 0) await insertFactions(saveId, missing);
+
+  const rows = await db.select<FactionRow[]>(
+    'SELECT * FROM factions WHERE save_id = ?',
+    [saveId],
+  );
+  return rows.map(rowToFaction);
 }
 
 /** Apaga o mapa da partida e gera um novo (botão "Novo mapa"). */
