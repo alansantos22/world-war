@@ -1,74 +1,27 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { api, apiError } from '../api/client';
+import { api } from '../api/client';
 
 const battles = ref<any[]>([]);
-const countries = ref<any[]>([]);
-const err = ref('');
-const showForm = ref(false);
-const form = ref({ name: '', attackerCountryId: 0, defenderCountryId: 0 });
 
 async function load() {
-  const [b, c] = await Promise.all([
-    api.get('/battles'),
-    api.get('/countries'),
-  ]);
-  battles.value = b.data;
-  countries.value = c.data;
-  if (c.data.length >= 2) {
-    form.value.attackerCountryId = c.data[0].id;
-    form.value.defenderCountryId = c.data[1].id;
-  }
+  const { data } = await api.get('/battles');
+  battles.value = data;
 }
 onMounted(load);
-
-async function create() {
-  err.value = '';
-  try {
-    await api.post('/battles', form.value);
-    showForm.value = false;
-    form.value.name = '';
-    await load();
-  } catch (e) {
-    err.value = apiError(e);
-  }
-}
 </script>
 
 <template>
   <div class="container">
     <h1>Campos de Batalha</h1>
     <p class="muted" style="margin-bottom:16px">
-      Escolha uma guerra e lute pelo seu lado.
+      Escolha uma guerra e lute pelo seu lado. Para iniciar uma nova ofensiva,
+      vá ao <router-link to="/map">Mapa</router-link>, clique numa região
+      vizinha e declare guerra — o vencedor toma o controle do território.
     </p>
 
-    <div v-if="err" class="toast err">{{ err }}</div>
-
     <div style="margin-bottom:14px">
-      <button @click="showForm = !showForm">
-        {{ showForm ? 'Cancelar' : 'Declarar nova guerra' }}
-      </button>
-    </div>
-
-    <div class="panel" v-if="showForm">
-      <h2>Nova guerra</h2>
-      <label>Nome da batalha</label>
-      <input v-model="form.name" placeholder="Ex.: Batalha de Berlim" />
-      <div class="row">
-        <div>
-          <label>Pais atacante</label>
-          <select v-model="form.attackerCountryId">
-            <option v-for="c in countries" :key="c.id" :value="c.id">{{ c.name }}</option>
-          </select>
-        </div>
-        <div>
-          <label>Pais defensor</label>
-          <select v-model="form.defenderCountryId">
-            <option v-for="c in countries" :key="c.id" :value="c.id">{{ c.name }}</option>
-          </select>
-        </div>
-      </div>
-      <button class="btn-red" style="margin-top:14px" @click="create">Declarar guerra</button>
+      <router-link to="/map" class="btn">⚔️ Declarar guerra pelo Mapa</router-link>
     </div>
 
     <div class="panel" v-for="b in battles" :key="b.id">
@@ -76,9 +29,20 @@ async function create() {
         <div>
           <h3>{{ b.name }}</h3>
           <span :style="{ color: b.attackerCountry?.color }">{{ b.attackerCountry?.name }}</span>
-          <span class="muted"> vs </span>
-          <span :style="{ color: b.defenderCountry?.color }">{{ b.defenderCountry?.name }}</span>
+          <span class="muted"> ataca </span>
+          <span v-if="b.region" class="tag">{{ b.region.name }}</span>
+          <span class="muted"> de </span>
+          <span v-if="b.defenderCountry" :style="{ color: b.defenderCountry.color }">
+            {{ b.defenderCountry.name }}
+          </span>
+          <span v-else class="muted">Território Neutro</span>
           <span class="tag" style="margin-left:8px">{{ b.status }}</span>
+          <span v-if="b.attackerPenaltyPercent > 0" class="tag" style="margin-left:6px;color:var(--red)">
+            atacante −{{ b.attackerPenaltyPercent }}%
+          </span>
+          <span v-if="b.regionCaptured" class="tag" style="margin-left:6px;color:var(--green)">
+            região conquistada
+          </span>
         </div>
         <router-link :to="`/battles/${b.id}`" class="btn">Entrar na batalha</router-link>
       </div>

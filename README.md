@@ -21,8 +21,14 @@ em batalhas entre nações.
 - **Trabalho** — emprega-se numa empresa e trabalha (custa 10 de energia,
   rende dinheiro, XP e produtos).
 - **Treino** — custa 10 de energia, aumenta a força (+0,5).
-- **Batalhas** — guerras entre dois países; cada golpe causa dano com base na
-  força, no nível e na arma usada (custa 10 de energia).
+- **Batalhas e conquista** — pelo mapa você declara guerra a uma região
+  (neutra ou inimiga); cada golpe causa dano com base na força, no nível e na
+  arma usada (custa 10 de energia). Ao **encerrar** a batalha, se o atacante
+  vencer, **o país toma o controle da região**. Capitais não são conquistáveis.
+- **Projeção de poder** — atacar uma região colada na sua fronteira não tem
+  penalidade; quanto mais longe (atravessando oceano/continente), maior o
+  *debuff* de dano do atacante (−5% por célula de distância, até −75%) — no
+  estilo de supply/distância de HoI4 e Europa Universalis.
 - **Mercado** — compre/venda comida e armas; loja do estado com estoque
   ilimitado e ofertas de outros jogadores.
 - **Ranking** — os 50 cidadãos mais fortes do mundo.
@@ -157,7 +163,10 @@ A interface é **responsiva** — funciona em telas de celular, tablet e desktop
 | GET    | `/api/companies`         | lista empresas                     |
 | POST   | `/api/companies/:id/job` | consegue um emprego                |
 | GET    | `/api/battles`           | lista batalhas                     |
+| GET    | `/api/battles/preview/:regionId` | prévia de ataque (distância/penalidade) |
+| POST   | `/api/battles`           | declara guerra a uma região        |
 | POST   | `/api/battles/:id/hit`   | desfere um golpe                   |
+| POST   | `/api/battles/:id/finish`| encerra a batalha (vencedor conquista a região) |
 | GET    | `/api/map`               | mapa: regiões agrupadas por país   |
 | GET    | `/api/resources`         | catálogo de recursos especiais     |
 | GET    | `/api/resources/scarcity`| escassez (regiões por recurso)     |

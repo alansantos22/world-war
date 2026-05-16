@@ -7,22 +7,20 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString } from 'class-validator';
 import { BattleService } from './battle.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UserId } from '../auth/user.decorator';
 import { BattleSide } from '../entities/enums';
 
 class CreateBattleDto {
+  /** Regiao alvo da ofensiva. O pais do jogador e o atacante. */
+  @IsInt()
+  regionId: number;
+
+  @IsOptional()
   @IsString()
-  @MinLength(3)
-  name: string;
-
-  @IsInt()
-  attackerCountryId: number;
-
-  @IsInt()
-  defenderCountryId: number;
+  name?: string;
 }
 
 class HitDto {
@@ -49,13 +47,18 @@ export class BattleController {
     return this.battle.detail(id);
   }
 
+  /** Previa de ataque: distancia e penalidade para o pais do jogador. */
+  @Get('preview/:regionId')
+  preview(
+    @UserId() userId: number,
+    @Param('regionId', ParseIntPipe) regionId: number,
+  ) {
+    return this.battle.attackPreview(userId, regionId);
+  }
+
   @Post()
-  create(@Body() dto: CreateBattleDto) {
-    return this.battle.create(
-      dto.name,
-      dto.attackerCountryId,
-      dto.defenderCountryId,
-    );
+  create(@UserId() userId: number, @Body() dto: CreateBattleDto) {
+    return this.battle.create(userId, dto.regionId, dto.name);
   }
 
   @Post(':id/hit')

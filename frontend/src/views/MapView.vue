@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { api, apiError } from '../api/client';
+import { useCitizenStore } from '../stores/citizen';
+
+const router = useRouter();
+const citizen = useCitizenStore();
 
 const grid = ref({ cols: 50, rows: 24 });
 const regions = ref<any[]>([]);
@@ -13,6 +18,13 @@ const mode = ref<'political' | 'resource'>('political');
 const selected = ref<any>(null);
 const hovered = ref<any>(null);
 const err = ref('');
+
+// Conquista: previa de ataque da regiao selecionada.
+const preview = ref<any>(null);
+const warErr = ref('');
+const warBusy = ref(false);
+
+const myCountryId = computed(() => citizen.me?.country?.id ?? null);
 
 const NEUTRAL_COLOR = '#3a4150';
 const OCEAN_COLOR = '#1c4a63';
@@ -39,6 +51,35 @@ function regionFill(r: any): string {
   if (mode.value === 'resource') return r.resource.color;
   return r.owner ? r.owner.color : NEUTRAL_COLOR;
 }
+// Seleciona uma regiao e, se nao for do jogador, busca a previa de ataque.
+async function select(r: any) {
+  selected.value = r;
+  preview.value = null;
+  warErr.value = '';
+  if (!r || r.owner?.id === myCountryId.value) return;
+  try {
+    const { data } = await api.get(`/battles/preview/${r.id}`);
+    preview.value = data;
+  } catch (e) {
+    warErr.value = apiError(e);
+  }
+}
+
+// Declara guerra: cria (ou entra na) batalha pela regiao e abre a tela dela.
+async function declareWar() {
+  if (!selected.value) return;
+  warErr.value = '';
+  warBusy.value = true;
+  try {
+    const { data } = await api.post('/battles', { regionId: selected.value.id });
+    router.push(`/battles/${data.id}`);
+  } catch (e) {
+    warErr.value = apiError(e);
+  } finally {
+    warBusy.value = false;
+  }
+}
+
 function isSelected(r: any) {
   return selected.value && selected.value.id === r.id;
 }
@@ -91,7 +132,7 @@ const viewBox = computed(() => `0 0 ${grid.value.cols} ${grid.value.rows}`);
             :height="grid.rows"
             :fill="OCEAN_COLOR"
           />
-          <g v-for="r in regions" :key="r.id" @click="selected = r"
+          <g v-for="r in regions" :key="r.id" @click="select(r)"
              @mouseenter="hovered = r" @mouseleave="hovered = null">
             <rect
               v-for="(c, ci) in r.cells"
@@ -192,6 +233,55 @@ const viewBox = computed(() => `0 0 ${grid.value.cols} ${grid.value.rows}`);
           <p class="muted" style="margin-top:6px">
             Tamanho do território: {{ selected.cells.length }} células.
           </p>
+
+          <!-- Conquista -->
+          <div v-if="warErr" class="toast err" style="margin-top:12px">{{ warErr }}</div>
+
+          <div
+            v-if="selected.isCapital && selected.owner?.id !== myCountryId"
+            class="war-box"
+          >
+            <strong>★ Capital</strong> &mdash; capitais não podem ser conquistadas.
+          </div>
+
+          <div
+            v-else-if="selected.owner && selected.owner.id === myCountryId"
+            class="war-box"
+          >
+            Este território já é do seu país.
+          </div>
+
+          <div v-else-if="preview" class="war-box">
+            <h3 style="margin-bottom:8px">⚔️ Expandir para esta região</h3>
+            <p class="muted" v-if="preview.gap === 0">
+              Faz fronteira com seu território — ataque em <strong>força total</strong>.
+            </p>
+            <p class="muted" v-else>
+              A {{ preview.gap }} célula(s) da sua fronteira. Projeção de poder
+              reduz o dano do atacante em
+              <strong style="color:var(--red)">−{{ preview.penaltyPercent }}%</strong>.
+            </p>
+            <div class="bar" style="margin:8px 0">
+              <div :style="{ width: (100 - preview.penaltyPercent) + '%', background: 'var(--green)' }"></div>
+            </div>
+            <p class="muted" style="margin-bottom:10px">
+              Defensor:
+              <strong v-if="preview.defenderCountry" :style="{ color: preview.defenderCountry.color }">
+                {{ preview.defenderCountry.name }}
+              </strong>
+              <strong v-else>Território Neutro</strong>
+            </p>
+            <button
+              v-if="preview.canAttack"
+              class="btn-red"
+              :disabled="warBusy"
+              style="width:100%"
+              @click="declareWar"
+            >
+              {{ preview.existingBattleId ? 'Entrar na batalha em andamento' : 'Declarar guerra' }}
+            </button>
+            <p v-else class="muted">{{ preview.blocker }}</p>
+          </div>
         </div>
         <div class="panel" v-else>
           <h2>Região</h2>
@@ -309,6 +399,13 @@ const viewBox = computed(() => `0 0 ${grid.value.cols} ${grid.value.rows}`);
   border-radius: 8px;
   padding: 12px;
   margin-top: 10px;
+}
+.war-box {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 @media (max-width: 760px) {
   .map-layout { grid-template-columns: 1fr; }

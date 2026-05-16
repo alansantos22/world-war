@@ -141,19 +141,41 @@ async function main() {
     );
   }
 
-  // 6. Batalha em andamento.
+  // 6. Batalha em andamento: o Brasil ataca uma regiao neutra vizinha.
   if ((await battleRepo.count()) === 0) {
-    await battleRepo.save(
-      battleRepo.create({
-        name: 'Guerra do Atlantico Sul',
-        attackerCountry: byCode('BRA'),
-        defenderCountry: byCode('ARG'),
-        status: BattleStatus.OPEN,
-        attackerDamage: 0,
-        defenderDamage: 0,
-      }),
-    );
-    console.log('Batalha inicial criada.');
+    const bra = byCode('BRA');
+    const braRegions = await regionRepo.find();
+    const braCells = braRegions
+      .filter((r) => r.ownerCountry?.id === bra?.id)
+      .flatMap((r) => r.cells);
+    // Regiao neutra mais proxima da fronteira do Brasil.
+    const cheby = (a: any, b: any) =>
+      Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+    const target = braRegions
+      .filter((r) => !r.ownerCountry && !r.isCapital)
+      .map((r) => ({
+        r,
+        d: Math.min(
+          ...braCells.flatMap((c) => r.cells.map((rc) => cheby(c, rc))),
+        ),
+      }))
+      .sort((a, b) => a.d - b.d)[0];
+    if (bra && target) {
+      const gap = Math.max(0, target.d - 1);
+      await battleRepo.save(
+        battleRepo.create({
+          name: `Ofensiva em ${target.r.name}`,
+          attackerCountry: bra,
+          defenderCountry: null,
+          region: target.r,
+          attackerFrontPenalty: Math.min(0.75, gap * 0.05),
+          status: BattleStatus.OPEN,
+          attackerDamage: 0,
+          defenderDamage: 0,
+        }),
+      );
+      console.log('Batalha inicial criada.');
+    }
   }
 
   // 7. Loja do estado: comida e armas de todas as qualidades.

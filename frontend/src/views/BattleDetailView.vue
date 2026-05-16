@@ -68,15 +68,48 @@ async function finish() {
     <p class="muted" style="margin-bottom:16px">
       <span :style="{ color: battle.attackerCountry?.color }">
         {{ battle.attackerCountry?.name }}</span>
-      vs
-      <span :style="{ color: battle.defenderCountry?.color }">
-        {{ battle.defenderCountry?.name }}</span>
+      ataca
+      <span v-if="battle.region" class="tag">{{ battle.region.name }}</span>
+      de
+      <span v-if="battle.defenderCountry" :style="{ color: battle.defenderCountry.color }">
+        {{ battle.defenderCountry.name }}</span>
+      <span v-else>Território Neutro</span>
       &middot; <span class="tag">{{ battle.status }}</span>
       <span v-if="battle.winnerSide"> &middot; Vencedor: {{ battle.winnerSide }}</span>
     </p>
 
     <div v-if="msg" class="toast ok">{{ msg }}</div>
     <div v-if="err" class="toast err">{{ err }}</div>
+
+    <div
+      v-if="battle.region && battle.status === 'OPEN'"
+      class="panel"
+      style="border-color:var(--accent)"
+    >
+      <h3>⚔️ Conquista de {{ battle.region.name }}</h3>
+      <p class="muted">
+        Se o <strong>atacante</strong> vencer, a região passa para o controle de
+        {{ battle.attackerCountry?.name }}.
+      </p>
+      <p class="muted" v-if="battle.attackerPenaltyPercent > 0" style="margin-top:6px">
+        Projeção de poder: a região está longe da fronteira, então os golpes do
+        atacante causam <strong style="color:var(--red)">−{{ battle.attackerPenaltyPercent }}%</strong>
+        de dano.
+      </p>
+      <p class="muted" v-else style="margin-top:6px">
+        Região na fronteira — atacante luta em força total.
+      </p>
+    </div>
+
+    <div
+      v-if="battle.status === 'FINISHED' && battle.region"
+      class="toast"
+      :class="battle.regionCaptured ? 'ok' : 'err'"
+    >
+      {{ battle.regionCaptured
+        ? `${battle.attackerCountry?.name} conquistou ${battle.region.name}!`
+        : `${battle.region.name} resistiu ao ataque.` }}
+    </div>
 
     <div class="panel">
       <h2>Placar de dano</h2>

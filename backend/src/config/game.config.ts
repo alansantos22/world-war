@@ -30,6 +30,12 @@ export const GameConfig = {
 
   // Comida: energia restaurada por unidade = qualidade * FOOD_ENERGY_PER_QUALITY
   FOOD_ENERGY_PER_QUALITY: 10,
+
+  // Guerra de conquista (projecao de poder, estilo HoI4/EU4)
+  // Atacar uma regiao colada na sua fronteira nao tem penalidade. Quanto mais
+  // longe (atravessando oceano, outro continente), mais fraco fica o ataque.
+  WAR_FRONT_PENALTY_PER_CELL: 0.05, // -5% de dano do atacante por celula de distancia
+  WAR_MAX_FRONT_PENALTY: 0.75, // teto: no maximo -75% de dano
 };
 
 /** XP acumulado necessario para atingir determinado nivel. */
