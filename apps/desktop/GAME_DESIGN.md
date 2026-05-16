@@ -104,6 +104,22 @@ Todo o resto do mundo começa **neutro**.
 > O direcionamento de cada nação acima é uma **proposta inicial** — é só um
 > campo em `nations.ts` e fácil de ajustar.
 
+### Bandeiras
+
+Cada facção tem uma **bandeira** própria, gerada no estilo *identicon* do
+GitHub ([`src/game/flags.ts`](src/game/flags.ts) +
+[`src/components/Flag.vue`](src/components/Flag.vue)): um padrão 5×5 simétrico
+derivado de uma semente, desenhado na cor da nação. As nações fixas usam o
+código como semente; a nação personalizada usa o nome. A bandeira aparece na
+seleção de nação, no painel da província, no ranking e na barra superior.
+
+### Nação personalizada (jogador)
+
+Além das 13 nações fixas, o jogador pode **criar a sua própria nação** ao
+iniciar um novo jogo (ver seção 5). Ela entra como uma 14ª facção, com código
+reservado `PLR`, e começa também com 1 província-capital — sorteada num ponto
+aleatório do continente que o jogador escolher.
+
 ---
 
 ## 4. Direcionamentos políticos
@@ -127,17 +143,85 @@ fórmulas de afinidade, efeitos diplomáticos) serão definidos depois.
 
 ---
 
-## 5. Persistência (SQLite)
+## 5. Menu inicial e partidas salvas
+
+O app abre no **menu inicial** ([`src/components/MainMenu.vue`](src/components/MainMenu.vue)),
+não direto no mapa. [`src/App.vue`](src/App.vue) é a **casca**: alterna entre o
+menu e a tela de jogo ([`src/components/GameView.vue`](src/components/GameView.vue)).
+
+O menu tem três opções:
+
+- **Iniciar novo jogo** — pede um nome para a partida e como o jogador vai
+  comandar (ver abaixo); então gera um mundo novo e entra no jogo.
+- **Carregar jogo salvo** — lista as partidas salvas (bandeira e nome da
+  nação do jogador, nº de províncias, data da última modificação); permite
+  carregar ou apagar cada uma.
+- **Configurações** — ver seção 6.
+
+### Escolha da nação do jogador
+
+Ao iniciar um novo jogo, o jogador escolhe entre dois modos:
+
+- **Escolher uma nação** — pega uma das 13 nações fixas (com bandeira, nome e
+  direcionamento à mostra).
+- **Criar minha nação** — define **nome**, **direcionamento**, **cor** e
+  **continente inicial**. A cor sai de uma paleta que já exclui as 13 cores
+  usadas pelas nações fixas, então nunca se repete. A capital é sorteada numa
+  província aleatória do continente escolhido.
+
+Dentro do jogo, a nação do jogador aparece na barra superior (bandeira +
+nome), tem a sua capital destacada no mapa com um anel branco e é marcada com
+a etiqueta **VOCÊ** no ranking e no painel da província.
+
+A barra superior também tem o botão **Salvar jogo** (renomeia a partida e
+confirma o estado atual como salvo) e o botão **Menu** (volta ao menu
+inicial). A partida atual aparece marcada com 📌 na barra.
+
+---
+
+## 6. Configurações
+
+Opções do **aplicativo** (valem para qualquer partida), guardadas no
+`localStorage` do computador — [`src/settings.ts`](src/settings.ts):
+
+| Configuração                          | Padrão | Efeito                                        |
+|---------------------------------------|--------|-----------------------------------------------|
+| Iniciar o jogo em tela cheia          | não    | Abre o app já em tela cheia.                  |
+| Confirmar antes de voltar ao menu     | sim    | Pede confirmação ao sair do jogo para o menu. |
+
+---
+
+## 7. Persistência (SQLite)
 
 O estado fica num banco SQLite local (`world-war.db`, no diretório de dados do
-app). Conexão em [`src/db.ts`](src/db.ts); leitura/escrita do mapa em
-[`src/game/world.ts`](src/game/world.ts).
+app). Conexão em [`src/db.ts`](src/db.ts); esquema e leitura/escrita do mapa em
+[`src/game/world.ts`](src/game/world.ts); gestão das partidas em
+[`src/game/saves.ts`](src/game/saves.ts).
+
+### Tabela `saves`
+
+Uma linha por **partida salva**, incluindo a nação do jogador.
+
+| Coluna             | Tipo    | Descrição                                            |
+|--------------------|---------|------------------------------------------------------|
+| `id`               | INTEGER | Chave primária.                                      |
+| `name`             | TEXT    | Nome da partida.                                     |
+| `created_at`       | TEXT    | Data/hora de criação (ISO).                          |
+| `updated_at`       | TEXT    | Data/hora da última gravação (ISO).                  |
+| `player_code`      | TEXT    | Código da nação do jogador (`PLR` se personalizada). |
+| `custom_name`      | TEXT    | Nome da nação personalizada (`NULL` se nação fixa).  |
+| `custom_color`     | TEXT    | Cor da nação personalizada.                          |
+| `custom_alignment` | TEXT    | Direcionamento da nação personalizada.               |
+| `custom_continent` | TEXT    | Continente inicial da nação personalizada.           |
 
 ### Tabela `provinces`
+
+Cada província pertence a uma partida (`save_id`).
 
 | Coluna       | Tipo    | Descrição                                  |
 |--------------|---------|--------------------------------------------|
 | `id`         | INTEGER | Chave primária.                            |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.       |
 | `x`, `y`     | INTEGER | Coordenada da célula na grade.             |
 | `continent`  | TEXT    | Código do continente (N/S/E/A/I/O).        |
 | `name`       | TEXT    | Nome da província.                         |
@@ -145,12 +229,14 @@ app). Conexão em [`src/db.ts`](src/db.ts); leitura/escrita do mapa em
 | `owner_code` | TEXT    | Código da nação dona, ou `NULL` se neutra. |
 | `is_capital` | INTEGER | 1 se é a capital de uma nação.             |
 
-Na primeira execução o mapa é gerado e gravado; depois é sempre carregado do
-banco. "Novo mapa" apaga e regenera.
+Criar um novo jogo gera o mapa e grava as províncias daquela partida; carregar
+uma partida lê as províncias do seu `save_id`. "Novo mapa" apaga e regenera só
+o mapa da partida atual. Bancos de versões antigas (sem `save_id`) são migrados
+para uma partida "Partida recuperada".
 
 ---
 
-## 6. Interface (HUD)
+## 8. Interface (HUD)
 
 A interface segue o estilo dos jogos de grande estratégia (Europa Universalis,
 Hearts of Iron): o **mapa ocupa a tela inteira** como fundo e a HUD são
@@ -161,7 +247,7 @@ deixando o mapa livre.
   **tela cheia** de verdade.
 - **Barra superior** — brasão/título, alternância de visão (Político /
   Recursos), os botões que abrem os painéis, a província sob o cursor e os
-  controles ("Novo mapa", tela cheia).
+  controles ("Novo mapa", "Salvar jogo", "Menu", tela cheia).
 - **Painel da província** (canto inferior esquerdo) — aparece ao **clicar numa
   província**; mostra dono, direcionamento e recurso. Fecha no `✕` ou ao
   clicar no oceano.
@@ -175,28 +261,37 @@ deixando o mapa livre.
 
 Regra de ouro: nenhum painel fica na frente do mapa sem o jogador ter pedido.
 
-## 7. Estrutura do código
+## 9. Estrutura do código
 
 ```
 apps/desktop/src/
 ├── db.ts                 conexão SQLite
-├── App.vue               tela do mapa-múndi
+├── settings.ts           configurações do app (localStorage)
+├── styles.css            estilos-base compartilhados
+├── App.vue               casca: alterna menu × jogo
+├── components/
+│   ├── MainMenu.vue      menu inicial (novo jogo / carregar / configurações)
+│   ├── GameView.vue      tela do mapa-múndi
+│   └── Flag.vue          bandeira (identicon) de uma facção
 └── game/
     ├── enums.ts          ResourceType
+    ├── flags.ts          geração do padrão das bandeiras
     ├── resources.ts      catálogo de recursos
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
     ├── map-generator.ts  geração procedural do mapa
-    └── world.ts          persistência do mapa no SQLite
+    ├── world.ts          esquema SQLite e persistência do mapa
+    └── saves.ts          gestão das partidas salvas
 ```
 
 ---
 
-## 8. Roteiro (próximos passos)
+## 10. Roteiro (próximos passos)
 
-1. **Escolher nação** — tela inicial "Novo jogo" para o jogador picar a facção.
+1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
+   **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
 2. **Turnos** — botão "Próximo turno" que avança o tempo.
 3. **Economia** — tesouro nacional; províncias geram renda/recursos por turno.
 4. **Expansão** — conquistar províncias neutras e vizinhas.
-5. **IA** — as outras 12 nações jogam sozinhas a cada turno.
+5. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
 6. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).

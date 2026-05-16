@@ -153,3 +153,18 @@ const BY_CODE = new Map(NATIONS.map((n) => [n.code, n]));
 export function nationByCode(code: string | null): Nation | null {
   return code ? BY_CODE.get(code) ?? null : null;
 }
+
+/**
+ * Código reservado para a nação **personalizada** criada pelo jogador.
+ * Não colide com nenhum dos códigos das 13 nações fixas.
+ */
+export const CUSTOM_NATION_CODE = 'PLR';
+
+/**
+ * Semente da bandeira de uma nação: as nações fixas usam o código; a nação
+ * personalizada usa o nome (assim cada partida personalizada tem desenho
+ * próprio).
+ */
+export function flagSeed(nation: Nation): string {
+  return nation.code === CUSTOM_NATION_CODE ? nation.name : nation.code;
+}

@@ -117,12 +117,17 @@ function dist2(ax: number, ay: number, bx: number, by: number): number {
 }
 
 /** Converte o desenho de um continente em uma lista de células. */
-function continentCells(continent: string): Cell[] {
+export function continentCells(continent: string): Cell[] {
   const cells: Cell[] = [];
   for (const [row, c0, c1] of LAND[continent]) {
     for (let x = c0; x <= c1; x++) cells.push({ x, y: row });
   }
   return cells;
+}
+
+/** Todas as células de terra do mundo (útil p/ silhuetas decorativas). */
+export function allLandCells(): Cell[] {
+  return Object.keys(LAND).flatMap(continentCells);
 }
 
 function uniqueNames(count: number): string[] {
