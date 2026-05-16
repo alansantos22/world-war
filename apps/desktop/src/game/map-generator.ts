@@ -2,6 +2,7 @@ import { ResourceType } from './enums';
 import { TerritoryProduction } from './economy';
 import { ClimateZone, Hemisphere } from './climate';
 import { resourceBoost } from './resources';
+import { TROOP_TYPES } from './squads';
 
 /**
  * Gerador procedural do mapa-múndi (vetorial estilizado).
@@ -45,8 +46,12 @@ export interface GeneratedProvince extends TerritoryProduction {
   seismic: boolean;
   /** `true` se há um vulcão na província. */
   volcano: boolean;
-  /** Força de batalha a derrubar para tomar o território de forma hostil. */
-  battleForce: number;
+  /**
+   * Vida somada das tropas de infantaria que defendem um território neutro.
+   * Derrubá-la a 0 deixa o território livre para ser tomado. Territórios já
+   * possuídos (capitais iniciais) começam com 0.
+   */
+  defenderHp: number;
   /** `true` se o território foi tomado de outra facção (não neutro). */
   conquered: boolean;
 }
@@ -244,7 +249,7 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
         climate: climateOf(cell.y),
         seismic: false,
         volcano: false,
-        battleForce: 0,
+        defenderHp: 0,
         conquered: false,
         manpowerProduction: 0,
         resourceProduction: 0,
@@ -337,14 +342,17 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
 
   // 5. Sorteia a produção por turno de cada província (capitais já marcadas).
   //    A produção do recurso local ainda leva o multiplicador de clima.
-  //    Cada província também recebe a sua FORÇA DE BATALHA — quanto é preciso
-  //    derrubar para tomá-la de forma hostil; as capitais resistem o dobro.
+  //    Cada território NEUTRO também recebe tropas de defesa (infantaria):
+  //    2 a 12 tropas, cada uma com 50 de vida — derrubar essa vida a 0 deixa
+  //    o território livre para ser tomado.
   for (const p of provinces) {
     Object.assign(p, rollProduction(p.isCapital));
     p.resourceProduction = Math.round(
       p.resourceProduction * resourceBoost(p.resource, p.climate, p.continent),
     );
-    p.battleForce = randInt(20, 80) * (p.isCapital ? 2 : 1);
+    p.defenderHp = p.ownerCode
+      ? 0
+      : randInt(2, 12) * TROOP_TYPES.INFANTARIA.hp;
   }
 
   // 6. Zonas sísmicas (anel de fogo) e vulcões.

@@ -6,8 +6,8 @@
  * sistema de **recrutamento**: a cidade produz a tropa ao longo de vários
  * turnos (fila de produção) e, quando pronta, a tropa entra no esquadrão.
  *
- * O sistema de **batalha** em si (atacar territórios e outros esquadrões)
- * ainda será implementado — ver `GAME_DESIGN.md`.
+ * O comandante e as tropas ganham **experiência** (level) nas batalhas; a
+ * resolução de combate em si fica em `battle.ts`. Ver `GAME_DESIGN.md`.
  */
 
 import { getDb } from '../db';
@@ -18,10 +18,43 @@ export const SQUAD_COST = 500;
 export const SQUAD_MANPOWER_COST = 1000;
 /** Manutenção por turno de um esquadrão — só o comandante. */
 export const SQUAD_UPKEEP = 25;
+/** Ataques que um esquadrão pode dar por turno. */
+export const ATTACKS_PER_TURN = 2;
+/** Vida que cada tropa (e o comandante) recupera por turno numa cidade sua. */
+export const HP_REGEN_PER_TURN = 5;
+
+// ===== Moral =====
+/** Moral máxima (e inicial) de um esquadrão, em pontos percentuais. */
+export const MORAL_MAX = 100;
+/** Moral perdida a cada movimento. */
+export const MORAL_MOVE_COST = 2;
+/** Moral recuperada por turno por um esquadrão parado (sem lutar/mover). */
+export const MORAL_REGEN = 5;
+/** Moral recuperada por turno parado em território da própria facção (dobro). */
+export const MORAL_REGEN_OWN_TILE = 10;
+
+// ===== Level e experiência =====
+/** Level máximo de um comandante ou tropa (experiência de batalha). */
+export const MAX_LEVEL = 5;
+/**
+ * XP necessário para subir de cada level (índice = level atual). É uma
+ * progressão geométrica de 20 (level 0→1) a 500 (level 4→5).
+ */
+export const LEVEL_XP_COSTS = [20, 45, 100, 224, 500];
+/** Cada level médio do esquadrão adiciona este tanto de força. */
+export const LEVEL_FORCE_BONUS = 0.1;
+/** XP fixo ganho por uma batalha. */
+export const XP_BASE_PER_BATTLE = 5;
+/** Teto da parcela de XP vinda da dificuldade da batalha. */
+export const XP_DIFFICULTY_MAX = 4;
+/** XP extra por derrotar todos os defensores de um território. */
+export const XP_TERRITORY_BONUS = 10;
+/** Multiplicador dos ganhos de XP — reservado para pesquisas futuras. */
+export const XP_GAIN_MULTIPLIER = 1;
 
 /** Valores iniciais do comandante de um esquadrão recém-criado. */
 export const COMMANDER_BASE = {
-  /** 1 estrela = sem bônus de força (ver `starMultiplier`). */
+  /** Estrelas — o **talento** inato do comandante (não muda com XP). */
   stars: 1,
   /** Força de batalha que o comandante contribui (a tropa soma ~1/3 disso). */
   force: 30,
@@ -30,9 +63,48 @@ export const COMMANDER_BASE = {
   maxHp: 100,
   /** Defesa do comandante. */
   defense: 1,
-  /** Experiência acumulada. */
+  /** Experiência de batalha acumulada (define o level). */
   xp: 0,
+  /** Tradição militar — somada à soma dos dados na batalha. */
+  tradition: 0,
 };
+
+/** Level de uma unidade a partir do XP acumulado. */
+export function levelFromXp(xp: number): number {
+  let level = 0;
+  let remaining = xp;
+  for (const cost of LEVEL_XP_COSTS) {
+    if (remaining >= cost) {
+      remaining -= cost;
+      level++;
+    } else break;
+  }
+  return level;
+}
+
+/** Progresso de level: level atual, XP dentro dele e XP para o próximo. */
+export interface LevelProgress {
+  level: number;
+  /** XP acumulado dentro do level atual. */
+  current: number;
+  /** XP necessário para o próximo level (0 se já no máximo). */
+  needed: number;
+}
+
+/** Decompõe o XP acumulado em level e progresso para o próximo. */
+export function levelProgress(xp: number): LevelProgress {
+  let level = 0;
+  let remaining = xp;
+  for (const cost of LEVEL_XP_COSTS) {
+    if (remaining >= cost) {
+      remaining -= cost;
+      level++;
+    } else {
+      return { level, current: remaining, needed: cost };
+    }
+  }
+  return { level, current: 0, needed: 0 };
+}
 
 // ===== Tropas =====
 
@@ -84,13 +156,17 @@ export interface SquadTroop {
   hp: number;
   /** Pontos de vida máximos. */
   maxHp: number;
+  /** Experiência de batalha acumulada. */
+  xp: number;
+  /** Level (0–5), derivado do XP. */
+  level: number;
 }
 
 // ===== Comandante e esquadrão =====
 
 /** O comandante que lidera um esquadrão. */
 export interface Commander {
-  /** Estrelas (1+) — quanto mais, maior o bônus de força e o limite de tropas. */
+  /** Estrelas (1–5) — o **talento** inato; dá +5% de força e o limite de tropas. */
   stars: number;
   /** Força de batalha contribuída pelo comandante. */
   force: number;
@@ -100,8 +176,12 @@ export interface Commander {
   maxHp: number;
   /** Defesa. */
   defense: number;
-  /** Experiência acumulada. */
+  /** Experiência de batalha acumulada. */
   xp: number;
+  /** Level (0–5), derivado do XP. */
+  level: number;
+  /** Tradição militar — somada à soma dos dados na batalha. */
+  tradition: number;
 }
 
 /** Um esquadrão posicionado num tile do mapa. */
@@ -116,6 +196,12 @@ export interface Squad {
   createdTurn: number;
   /** Último turno em que se moveu (move-se uma vez por turno). */
   lastMovedTurn: number;
+  /** Ataques já gastos no turno atual (zera a cada turno). */
+  attacksUsed: number;
+  /** Moral do esquadrão (0–100). Afeta a força em batalha. */
+  moral: number;
+  /** Nome dado pelo jogador, ou `null` (mostra "Esquadrão #id"). */
+  name: string | null;
   /** O comandante do esquadrão. */
   commander: Commander;
   /** As tropas do esquadrão (sem contar o comandante). */
@@ -129,12 +215,16 @@ interface SquadRow {
   y: number;
   created_turn: number;
   last_moved_turn: number;
+  attacks_used: number;
+  moral: number;
+  name: string | null;
   cmd_stars: number;
   cmd_force: number;
   cmd_hp: number;
   cmd_max_hp: number;
   cmd_defense: number;
   cmd_xp: number;
+  cmd_tradition: number;
 }
 
 interface TroopRow {
@@ -144,6 +234,7 @@ interface TroopRow {
   force: number;
   hp: number;
   max_hp: number;
+  xp: number;
 }
 
 function rowToSquad(r: SquadRow): Squad {
@@ -154,6 +245,9 @@ function rowToSquad(r: SquadRow): Squad {
     y: r.y,
     createdTurn: r.created_turn,
     lastMovedTurn: r.last_moved_turn,
+    attacksUsed: r.attacks_used,
+    moral: r.moral,
+    name: r.name,
     commander: {
       stars: r.cmd_stars,
       force: r.cmd_force,
@@ -161,9 +255,18 @@ function rowToSquad(r: SquadRow): Squad {
       maxHp: r.cmd_max_hp,
       defense: r.cmd_defense,
       xp: r.cmd_xp,
+      level: levelFromXp(r.cmd_xp),
+      tradition: r.cmd_tradition,
     },
     troops: [],
   };
+}
+
+/** Nome de exibição de um esquadrão (o nome dado, ou "Esquadrão #id"). */
+export function squadName(squad: Squad): string {
+  return squad.name && squad.name.trim()
+    ? squad.name
+    : `Esquadrão #${squad.id}`;
 }
 
 /**
@@ -183,22 +286,66 @@ export function maxTroops(stars: number): number {
 }
 
 /**
+ * Level médio do esquadrão. O **comandante pesa como 3 tropas** — um
+ * comandante experiente puxa tropas fracas para cima, e um inexperiente
+ * arrasta tropas fortes para baixo.
+ */
+export function averageLevel(squad: Squad): number {
+  const total =
+    squad.commander.level * 3 +
+    squad.troops.reduce((sum, t) => sum + t.level, 0);
+  return total / (3 + squad.troops.length);
+}
+
+/** Bônus de força conferido pela experiência: +10% por level médio. */
+export function levelMultiplier(squad: Squad): number {
+  return 1 + averageLevel(squad) * LEVEL_FORCE_BONUS;
+}
+
+/**
  * Força de batalha total do esquadrão: a força do comandante somada à das
- * tropas, multiplicada pelo bônus de estrelas.
+ * tropas, multiplicada pelo **talento** (estrelas) e pela **experiência**
+ * (level médio).
  */
 export function squadForce(squad: Squad): number {
   const base =
     squad.commander.force +
     squad.troops.reduce((sum, t) => sum + t.force, 0);
-  return Math.round(base * starMultiplier(squad.commander.stars));
+  return Math.round(
+    base * starMultiplier(squad.commander.stars) * levelMultiplier(squad),
+  );
 }
 
-/** Manutenção por turno de um esquadrão: o comandante mais as tropas. */
+/** Manutenção-base por turno de um esquadrão: o comandante mais as tropas. */
 export function squadUpkeep(squad: Squad): number {
   return (
     SQUAD_UPKEEP +
     squad.troops.reduce((sum, t) => sum + TROOP_TYPES[t.kind].upkeep, 0)
   );
+}
+
+/**
+ * Manutenção efetiva de um esquadrão: cai pela **metade** quando ele está num
+ * tile da própria facção — tropas em repouso custam menos que em campanha.
+ */
+export function squadUpkeepAt(squad: Squad, onOwnTile: boolean): number {
+  const base = squadUpkeep(squad);
+  return onOwnTile ? Math.round(base / 2) : base;
+}
+
+/** Defesa de um esquadrão — hoje só a defesa do comandante. */
+export function squadDefense(squad: Squad): number {
+  return squad.commander.defense;
+}
+
+/** Ataques que o esquadrão ainda pode dar neste turno. */
+export function attacksLeft(squad: Squad): number {
+  return Math.max(0, ATTACKS_PER_TURN - squad.attacksUsed);
+}
+
+/** Um esquadrão pode atacar se está pronto e ainda tem ataques no turno. */
+export function canSquadAttack(squad: Squad, currentTurn: number): boolean {
+  return isSquadReady(squad, currentTurn) && attacksLeft(squad) > 0;
 }
 
 /** Um esquadrão fica pronto no turno **seguinte** ao da sua criação. */
@@ -247,6 +394,8 @@ export async function loadSquads(saveId: number): Promise<Squad[]> {
       force: r.force,
       hp: r.hp,
       maxHp: r.max_hp,
+      xp: r.xp,
+      level: levelFromXp(r.xp),
     });
     bySquad.set(r.squad_id, list);
   }
@@ -292,8 +441,9 @@ export async function createSquad(
     await db.execute(
       `INSERT INTO squads
          (save_id, owner_code, x, y, created_turn, last_moved_turn,
-          cmd_stars, cmd_force, cmd_hp, cmd_max_hp, cmd_defense, cmd_xp)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+          cmd_stars, cmd_force, cmd_hp, cmd_max_hp, cmd_defense, cmd_xp,
+          cmd_tradition)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
       [
         saveId,
         ownerCode,
@@ -306,6 +456,7 @@ export async function createSquad(
         COMMANDER_BASE.maxHp,
         COMMANDER_BASE.defense,
         COMMANDER_BASE.xp,
+        COMMANDER_BASE.tradition,
       ],
     );
     await db.execute('COMMIT');
@@ -315,19 +466,20 @@ export async function createSquad(
   }
 }
 
-/** Exclui um esquadrão — reembolsa a fila de recrutamento ainda pendente. */
+/**
+ * Exclui um esquadrão (dissolvido pelo jogador ou destruído em batalha) e as
+ * suas tropas. **Não há reembolso** — esquadrão perdido é perdido.
+ */
 export async function deleteSquad(squadId: number): Promise<void> {
   const db = await getDb();
-  const orders = await db.select<{ id: number }[]>(
-    'SELECT id FROM recruit_orders WHERE squad_id = ?',
-    [squadId],
-  );
-  for (const o of orders) await cancelRecruit(o.id);
   await db.execute('DELETE FROM squad_troops WHERE squad_id = ?', [squadId]);
   await db.execute('DELETE FROM squads WHERE id = ?', [squadId]);
 }
 
-/** Move um esquadrão para um tile, gastando o seu movimento do turno. */
+/**
+ * Move um esquadrão para um tile, gastando o seu movimento do turno e
+ * `MORAL_MOVE_COST` de moral.
+ */
 export async function moveSquad(
   squadId: number,
   x: number,
@@ -336,14 +488,66 @@ export async function moveSquad(
 ): Promise<void> {
   const db = await getDb();
   await db.execute(
-    'UPDATE squads SET x = ?, y = ?, last_moved_turn = ? WHERE id = ?',
-    [x, y, currentTurn, squadId],
+    `UPDATE squads
+       SET x = ?, y = ?, last_moved_turn = ?, moral = MAX(0, moral - ?)
+     WHERE id = ?`,
+    [x, y, currentTurn, MORAL_MOVE_COST, squadId],
   );
+}
+
+/** Exclui uma tropa de um esquadrão. */
+export async function deleteTroop(troopId: number): Promise<void> {
+  const db = await getDb();
+  await db.execute('DELETE FROM squad_troops WHERE id = ?', [troopId]);
+}
+
+/**
+ * Move uma tropa para outro esquadrão. Falha se o esquadrão de destino já
+ * estiver no limite de tropas. (A interface só oferece esquadrões no mesmo
+ * tile — ver `GAME_DESIGN.md`.)
+ */
+export async function moveTroop(
+  troopId: number,
+  targetSquadId: number,
+): Promise<void> {
+  const db = await getDb();
+  const tgt = await db.select<{ cmd_stars: number }[]>(
+    'SELECT cmd_stars FROM squads WHERE id = ?',
+    [targetSquadId],
+  );
+  if (!tgt[0]) throw new Error('Esquadrão de destino não encontrado.');
+  const cnt = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM squad_troops WHERE squad_id = ?',
+    [targetSquadId],
+  );
+  if ((cnt[0]?.n ?? 0) >= maxTroops(tgt[0].cmd_stars)) {
+    throw new Error('O esquadrão de destino já atingiu o limite de tropas.');
+  }
+  await db.execute('UPDATE squad_troops SET squad_id = ? WHERE id = ?', [
+    targetSquadId,
+    troopId,
+  ]);
+}
+
+/** Renomeia um esquadrão (um nome vazio volta para "Esquadrão #id"). */
+export async function renameSquad(
+  squadId: number,
+  name: string,
+): Promise<void> {
+  const db = await getDb();
+  const clean = name.trim().slice(0, 40);
+  await db.execute('UPDATE squads SET name = ? WHERE id = ?', [
+    clean || null,
+    squadId,
+  ]);
 }
 
 // ===== Fila de recrutamento =====
 
-/** Uma ordem de recrutamento na fila de produção de uma cidade. */
+/**
+ * Uma ordem de recrutamento na fila de produção de uma cidade. A tropa pronta
+ * vai para o **inventário da cidade** (ver `CityTroop`), não para um esquadrão.
+ */
 export interface RecruitOrder {
   id: number;
   /** Tile da cidade que produz a tropa. */
@@ -351,8 +555,6 @@ export interface RecruitOrder {
   y: number;
   /** Facção dona. */
   ownerCode: string;
-  /** Esquadrão que receberá a tropa pronta. */
-  squadId: number;
   /** Tipo da tropa. */
   kind: TroopKind;
   /** Produção necessária para concluir a tropa. */
@@ -367,7 +569,6 @@ interface RecruitRow {
   x: number;
   y: number;
   owner_code: string;
-  squad_id: number;
   kind: string;
   prod_cost: number;
   prod_done: number;
@@ -387,7 +588,6 @@ export async function loadRecruitOrders(
     x: r.x,
     y: r.y,
     ownerCode: r.owner_code,
-    squadId: r.squad_id,
     kind: r.kind as TroopKind,
     prodCost: r.prod_cost,
     prodDone: r.prod_done,
@@ -395,36 +595,19 @@ export async function loadRecruitOrders(
 }
 
 /**
- * Enfileira o recrutamento de uma tropa para um esquadrão numa cidade. Cobra
- * o dinheiro e o manpower na hora; a produção será gasta turno a turno. Falha
- * se faltarem recursos ou se o esquadrão já estiver no limite de tropas.
+ * Enfileira o recrutamento de uma tropa numa cidade. Cobra o dinheiro e o
+ * manpower na hora; a produção será gasta turno a turno e, ao concluir, a
+ * tropa entra no **inventário da cidade**.
  */
 export async function queueRecruit(
   saveId: number,
   ownerCode: string,
   x: number,
   y: number,
-  squadId: number,
   kind: TroopKind,
 ): Promise<void> {
   const db = await getDb();
   const troop = TROOP_TYPES[kind];
-
-  const sq = await db.select<{ cmd_stars: number }[]>(
-    'SELECT cmd_stars FROM squads WHERE id = ?',
-    [squadId],
-  );
-  if (!sq[0]) throw new Error('Esquadrão não encontrado.');
-
-  const cnt = await db.select<{ n: number }[]>(
-    `SELECT
-       (SELECT COUNT(*) FROM squad_troops  WHERE squad_id = ?) +
-       (SELECT COUNT(*) FROM recruit_orders WHERE squad_id = ?) AS n`,
-    [squadId, squadId],
-  );
-  if ((cnt[0]?.n ?? 0) >= maxTroops(sq[0].cmd_stars)) {
-    throw new Error('O esquadrão já atingiu o limite de tropas.');
-  }
 
   const rows = await db.select<{ money: number; manpower: number }[]>(
     'SELECT money, manpower FROM factions WHERE save_id = ? AND code = ?',
@@ -445,11 +628,12 @@ export async function queueRecruit(
        WHERE save_id = ? AND code = ?`,
       [troop.moneyCost, troop.manpowerCost, saveId, ownerCode],
     );
+    // `squad_id` é coluna legada (a tropa vai para o inventário da cidade).
     await db.execute(
       `INSERT INTO recruit_orders
          (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-      [saveId, x, y, ownerCode, squadId, kind, troop.productionCost],
+       VALUES (?, ?, ?, ?, 0, ?, ?, 0)`,
+      [saveId, x, y, ownerCode, kind, troop.productionCost],
     );
     await db.execute('COMMIT');
   } catch (e) {
@@ -476,6 +660,110 @@ export async function cancelRecruit(orderId: number): Promise<void> {
       [troop.moneyCost, troop.manpowerCost, o.save_id, o.owner_code],
     );
     await db.execute('DELETE FROM recruit_orders WHERE id = ?', [orderId]);
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+}
+
+// ===== Inventário de tropas da cidade =====
+
+/**
+ * Uma tropa guardada no **inventário de uma cidade** — já treinada, mas ainda
+ * fora de um esquadrão. O jogador a transfere para um esquadrão estacionado
+ * naquela cidade.
+ */
+export interface CityTroop {
+  id: number;
+  /** Tile da cidade onde a tropa está guardada. */
+  x: number;
+  y: number;
+  /** Facção dona. */
+  ownerCode: string;
+  kind: TroopKind;
+  hp: number;
+  maxHp: number;
+  xp: number;
+  /** Level (0–5), derivado do XP. */
+  level: number;
+}
+
+interface CityTroopRow {
+  id: number;
+  x: number;
+  y: number;
+  owner_code: string;
+  kind: string;
+  hp: number;
+  max_hp: number;
+  xp: number;
+}
+
+/** Carrega as tropas no inventário das cidades de uma partida. */
+export async function loadCityTroops(saveId: number): Promise<CityTroop[]> {
+  const db = await getDb();
+  const rows = await db.select<CityTroopRow[]>(
+    'SELECT * FROM city_troops WHERE save_id = ? ORDER BY id',
+    [saveId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    x: r.x,
+    y: r.y,
+    ownerCode: r.owner_code,
+    kind: r.kind as TroopKind,
+    hp: r.hp,
+    maxHp: r.max_hp,
+    xp: r.xp,
+    level: levelFromXp(r.xp),
+  }));
+}
+
+/**
+ * Move tropas do inventário de uma cidade para um esquadrão. Falha se o
+ * esquadrão não comportar todas (limite pelas estrelas do comandante).
+ */
+export async function moveCityTroopsToSquad(
+  troopIds: number[],
+  squadId: number,
+): Promise<void> {
+  if (troopIds.length === 0) return;
+  const db = await getDb();
+  const sq = await db.select<{ cmd_stars: number }[]>(
+    'SELECT cmd_stars FROM squads WHERE id = ?',
+    [squadId],
+  );
+  if (!sq[0]) throw new Error('Esquadrão não encontrado.');
+  const cnt = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM squad_troops WHERE squad_id = ?',
+    [squadId],
+  );
+  if ((cnt[0]?.n ?? 0) + troopIds.length > maxTroops(sq[0].cmd_stars)) {
+    throw new Error('O esquadrão não comporta todas essas tropas.');
+  }
+  const placeholders = troopIds.map(() => '?').join(', ');
+  const rows = await db.select<CityTroopRow[]>(
+    `SELECT * FROM city_troops WHERE id IN (${placeholders})`,
+    troopIds,
+  );
+  await db.execute('BEGIN');
+  try {
+    for (const r of rows) {
+      await db.execute(
+        `INSERT INTO squad_troops (squad_id, kind, force, hp, max_hp, xp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          squadId,
+          r.kind,
+          TROOP_TYPES[r.kind as TroopKind].force,
+          r.hp,
+          r.max_hp,
+          r.xp,
+        ],
+      );
+      await db.execute('DELETE FROM city_troops WHERE id = ?', [r.id]);
+    }
     await db.execute('COMMIT');
   } catch (e) {
     await db.execute('ROLLBACK');

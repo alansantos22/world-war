@@ -17,7 +17,11 @@ import { ClimateZone } from './climate';
 import {
   loadSquads,
   loadRecruitOrders,
-  squadUpkeep,
+  squadUpkeepAt,
+  HP_REGEN_PER_TURN,
+  MORAL_MAX,
+  MORAL_REGEN,
+  MORAL_REGEN_OWN_TILE,
   TROOP_TYPES,
   type RecruitOrder,
   type TroopKind,
@@ -39,8 +43,11 @@ export interface Province extends TerritoryProduction {
   seismic: boolean;
   /** `true` se há um vulcão na província. */
   volcano: boolean;
-  /** Força de batalha a derrubar para tomar o território de forma hostil. */
-  battleForce: number;
+  /**
+   * Vida somada das tropas de defesa de um território neutro; derrubá-la a 0
+   * deixa o território livre para ser tomado. Territórios possuídos têm 0.
+   */
+  defenderHp: number;
   /** `true` se o território foi tomado de outra facção (não neutro). */
   conquered: boolean;
 }
@@ -62,7 +69,7 @@ interface ProvinceRow {
   climate: string;
   seismic: number;
   volcano: number;
-  battle_force: number;
+  defender_hp: number;
   conquered: number;
 }
 
@@ -200,9 +207,36 @@ export async function ensureSchema(): Promise<void> {
       cmd_hp          INTEGER NOT NULL DEFAULT 100,
       cmd_max_hp      INTEGER NOT NULL DEFAULT 100,
       cmd_defense     INTEGER NOT NULL DEFAULT 1,
-      cmd_xp          INTEGER NOT NULL DEFAULT 0
+      cmd_xp          INTEGER NOT NULL DEFAULT 0,
+      attacks_used    INTEGER NOT NULL DEFAULT 0,
+      moral           INTEGER NOT NULL DEFAULT 100,
+      cmd_tradition   INTEGER NOT NULL DEFAULT 0,
+      name            TEXT
     )
   `);
+  // Migração: colunas de combate (esquadrões anteriores ao sistema de batalha).
+  const squadCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(squads)',
+  );
+  const haveSquadCol = new Set(squadCols.map((c) => c.name));
+  if (!haveSquadCol.has('attacks_used')) {
+    await db.execute(
+      'ALTER TABLE squads ADD COLUMN attacks_used INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+  if (!haveSquadCol.has('moral')) {
+    await db.execute(
+      'ALTER TABLE squads ADD COLUMN moral INTEGER NOT NULL DEFAULT 100',
+    );
+  }
+  if (!haveSquadCol.has('cmd_tradition')) {
+    await db.execute(
+      'ALTER TABLE squads ADD COLUMN cmd_tradition INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+  if (!haveSquadCol.has('name')) {
+    await db.execute('ALTER TABLE squads ADD COLUMN name TEXT');
+  }
 
   // Tropas de cada esquadrão (o comandante é parte do próprio esquadrão).
   await db.execute(`
@@ -212,9 +246,19 @@ export async function ensureSchema(): Promise<void> {
       kind      TEXT    NOT NULL,
       force     INTEGER NOT NULL,
       hp        INTEGER NOT NULL,
-      max_hp    INTEGER NOT NULL
+      max_hp    INTEGER NOT NULL,
+      xp        INTEGER NOT NULL DEFAULT 0
     )
   `);
+  // Migração: a coluna de XP das tropas (tropas anteriores ao sistema de level).
+  const troopCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(squad_troops)',
+  );
+  if (!troopCols.some((c) => c.name === 'xp')) {
+    await db.execute(
+      'ALTER TABLE squad_troops ADD COLUMN xp INTEGER NOT NULL DEFAULT 0',
+    );
+  }
 
   // Fila de recrutamento: tropas que as cidades estão produzindo por turno.
   await db.execute(`
@@ -228,6 +272,31 @@ export async function ensureSchema(): Promise<void> {
       kind       TEXT    NOT NULL,
       prod_cost  INTEGER NOT NULL,
       prod_done  INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  // Histórico de batalhas — uma linha por batalha; `data` é o relatório JSON.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS battle_logs (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id INTEGER NOT NULL,
+      turn    INTEGER NOT NULL,
+      data    TEXT    NOT NULL
+    )
+  `);
+
+  // Inventário de tropas das cidades — tropas recrutadas, fora de esquadrão.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS city_troops (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      x          INTEGER NOT NULL,
+      y          INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      kind       TEXT    NOT NULL,
+      hp         INTEGER NOT NULL,
+      max_hp     INTEGER NOT NULL,
+      xp         INTEGER NOT NULL DEFAULT 0
     )
   `);
 
@@ -254,7 +323,7 @@ export async function ensureSchema(): Promise<void> {
         climate       TEXT    NOT NULL DEFAULT 'AMENO',
         seismic       INTEGER NOT NULL DEFAULT 0,
         volcano       INTEGER NOT NULL DEFAULT 0,
-        battle_force  INTEGER NOT NULL DEFAULT 0,
+        defender_hp   INTEGER NOT NULL DEFAULT 0,
         conquered     INTEGER NOT NULL DEFAULT 0
       )
     `);
@@ -289,7 +358,7 @@ export async function ensureSchema(): Promise<void> {
     'culture_prod',
     'seismic',
     'volcano',
-    'battle_force',
+    'defender_hp',
     'conquered',
   ]) {
     if (!haveProvCol.has(col)) {
@@ -323,7 +392,7 @@ function rowToProvince(r: ProvinceRow): Province {
     climate: r.climate as ClimateZone,
     seismic: r.seismic === 1,
     volcano: r.volcano === 1,
-    battleForce: r.battle_force,
+    defenderHp: r.defender_hp,
     conquered: r.conquered === 1,
   };
 }
@@ -366,7 +435,7 @@ async function insertProvinces(
         `INSERT INTO provinces
            (save_id, x, y, continent, name, resource, owner_code, is_capital,
             manpower_prod, resource_prod, production, research_prod, culture_prod,
-            climate, seismic, volcano, battle_force, conquered)
+            climate, seismic, volcano, defender_hp, conquered)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           saveId,
@@ -385,7 +454,7 @@ async function insertProvinces(
           p.climate,
           p.seismic ? 1 : 0,
           p.volcano ? 1 : 0,
-          p.battleForce,
+          p.defenderHp,
           p.conquered ? 1 : 0,
         ],
       );
@@ -561,6 +630,8 @@ export async function regenerateMap(saveId: number): Promise<Province[]> {
     [saveId],
   );
   await db.execute('DELETE FROM recruit_orders WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM battle_logs WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM city_troops WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM squads WHERE save_id = ?', [saveId]);
   await insertProvinces(
     saveId,
@@ -582,11 +653,16 @@ export interface TurnResult {
  * - cada facção recebe o **manpower**, os **pontos de pesquisa** e a
  *   **cultura** produzidos pelas suas províncias (as capitais produzem o
  *   dobro — ver `map-generator`);
- * - cada facção paga a **manutenção** dos seus esquadrões em **dinheiro**
- *   (comandante + tropas — ver `squadUpkeep`);
+ * - cada facção paga a **manutenção** do seu exército em **dinheiro** —
+ *   esquadrões e tropas de inventário; quem está num tile da própria facção
+ *   custa **metade** (ver `squadUpkeepAt`);
  * - a **fila de recrutamento** de cada cidade avança: a produção da província
  *   é gasta na primeira tropa da fila e, quando concluída, ela entra no
- *   esquadrão alvo.
+ *   inventário da cidade;
+ * - cada esquadrão parado em **território próprio** recupera vida (comandante
+ *   e tropas); os esquadrões que não lutaram nem se moveram recuperam
+ *   **moral** (o dobro em território próprio);
+ * - todos os esquadrões recuperam os seus **ataques** do turno.
  *
  * A influência ainda não tem fonte de produção, então não muda.
  */
@@ -612,18 +688,35 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     gain.set(p.ownerCode, g);
   }
 
-  // Soma, por facção, a manutenção dos seus esquadrões (comandante + tropas).
+  // Mapa de células → província, usado na manutenção, no recrutamento e na
+  // recuperação dos esquadrões.
+  const provByTile = new Map(provinces.map((p) => [`${p.x},${p.y}`, p]));
+
+  // Soma, por facção, a manutenção do exército. Esquadrões e tropas **num
+  // tile da própria facção custam metade** (tropas em repouso).
   const squads = await loadSquads(saveId);
   const upkeep = new Map<string, number>();
   for (const s of squads) {
-    upkeep.set(s.ownerCode, (upkeep.get(s.ownerCode) ?? 0) + squadUpkeep(s));
+    const prov = provByTile.get(`${s.x},${s.y}`);
+    const onOwnTile = !!prov && prov.ownerCode === s.ownerCode;
+    upkeep.set(
+      s.ownerCode,
+      (upkeep.get(s.ownerCode) ?? 0) + squadUpkeepAt(s, onOwnTile),
+    );
+  }
+  // As tropas guardadas no inventário das cidades custam metade da manutenção.
+  const cityTroopRows = await db.select<
+    { owner_code: string; kind: string }[]
+  >('SELECT owner_code, kind FROM city_troops WHERE save_id = ?', [saveId]);
+  for (const r of cityTroopRows) {
+    const cost = Math.round(TROOP_TYPES[r.kind as TroopKind].upkeep / 2);
+    upkeep.set(r.owner_code, (upkeep.get(r.owner_code) ?? 0) + cost);
   }
 
   // Processa a fila de recrutamento: a produção de cada cidade avança a
-  // primeira ordem da sua fila; tropas concluídas entram no esquadrão alvo.
+  // primeira ordem da sua fila; a tropa concluída entra no inventário da
+  // cidade (ver `city_troops`).
   const orders = await loadRecruitOrders(saveId);
-  const provByTile = new Map(provinces.map((p) => [`${p.x},${p.y}`, p]));
-  const squadById = new Map(squads.map((s) => [s.id, s]));
   const frontByTile = new Map<string, RecruitOrder>();
   for (const o of orders) {
     const k = `${o.x},${o.y}`;
@@ -631,19 +724,55 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   }
   const orderProgress: { id: number; prodDone: number }[] = [];
   const finishedOrders: number[] = [];
-  const newTroops: { squadId: number; kind: TroopKind }[] = [];
+  const newTroops: {
+    x: number;
+    y: number;
+    ownerCode: string;
+    kind: TroopKind;
+  }[] = [];
   for (const [k, front] of frontByTile) {
     const prov = provByTile.get(k);
     if (!prov) continue;
     const done = front.prodDone + prov.production;
     if (done >= front.prodCost) {
       finishedOrders.push(front.id);
-      // Só entrega a tropa se o esquadrão alvo ainda existir.
-      if (squadById.has(front.squadId)) {
-        newTroops.push({ squadId: front.squadId, kind: front.kind });
-      }
+      newTroops.push({
+        x: front.x,
+        y: front.y,
+        ownerCode: front.ownerCode,
+        kind: front.kind,
+      });
     } else {
       orderProgress.push({ id: front.id, prodDone: done });
+    }
+  }
+
+  // Recuperação por turno dos esquadrões:
+  // - vida: só em território da própria facção (comandante e tropas);
+  // - moral: para esquadrões parados (sem lutar nem mover), +5% — o dobro se
+  //   estiverem num tile da própria facção.
+  const cmdHeal: { id: number; hp: number }[] = [];
+  const troopHeal: { id: number; hp: number }[] = [];
+  const moralRegen: { id: number; moral: number }[] = [];
+  for (const s of squads) {
+    const prov = provByTile.get(`${s.x},${s.y}`);
+    const onOwnTile = !!prov && prov.ownerCode === s.ownerCode;
+    if (onOwnTile) {
+      const newCmdHp = Math.min(
+        s.commander.maxHp,
+        s.commander.hp + HP_REGEN_PER_TURN,
+      );
+      if (newCmdHp !== s.commander.hp) cmdHeal.push({ id: s.id, hp: newCmdHp });
+      for (const t of s.troops) {
+        const newHp = Math.min(t.maxHp, t.hp + HP_REGEN_PER_TURN);
+        if (newHp !== t.hp) troopHeal.push({ id: t.id, hp: newHp });
+      }
+    }
+    const idle = s.lastMovedTurn !== save.turn && s.attacksUsed === 0;
+    if (idle) {
+      const gain = onOwnTile ? MORAL_REGEN_OWN_TILE : MORAL_REGEN;
+      const newMoral = Math.min(MORAL_MAX, s.moral + gain);
+      if (newMoral !== s.moral) moralRegen.push({ id: s.id, moral: newMoral });
     }
   }
 
@@ -680,11 +809,34 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     for (const t of newTroops) {
       const troop = TROOP_TYPES[t.kind];
       await db.execute(
-        `INSERT INTO squad_troops (squad_id, kind, force, hp, max_hp)
-         VALUES (?, ?, ?, ?, ?)`,
-        [t.squadId, t.kind, troop.force, troop.hp, troop.hp],
+        `INSERT INTO city_troops (save_id, x, y, owner_code, kind, hp, max_hp, xp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+        [saveId, t.x, t.y, t.ownerCode, t.kind, troop.hp, troop.hp],
       );
     }
+    // Recupera a vida dos esquadrões em território próprio.
+    for (const h of cmdHeal) {
+      await db.execute('UPDATE squads SET cmd_hp = ? WHERE id = ?', [
+        h.hp,
+        h.id,
+      ]);
+    }
+    for (const h of troopHeal) {
+      await db.execute('UPDATE squad_troops SET hp = ? WHERE id = ?', [
+        h.hp,
+        h.id,
+      ]);
+    }
+    for (const m of moralRegen) {
+      await db.execute('UPDATE squads SET moral = ? WHERE id = ?', [
+        m.moral,
+        m.id,
+      ]);
+    }
+    // Devolve a todos os esquadrões os seus ataques do turno.
+    await db.execute('UPDATE squads SET attacks_used = 0 WHERE save_id = ?', [
+      saveId,
+    ]);
     await db.execute('UPDATE saves SET turn = ?, updated_at = ? WHERE id = ?', [
       turn,
       new Date().toISOString(),
@@ -697,4 +849,39 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   }
 
   return { turn, factions };
+}
+
+/**
+ * Toma um território neutro já **sem defensores**: ele passa a pertencer à
+ * facção. Se `devastate` for `true`, o território é **arrasado** — toda a sua
+ * produção por turno (manpower, recurso, produção, pesquisa e cultura) é
+ * zerada. Devolve a província atualizada.
+ */
+export async function takeTerritory(
+  provinceId: number,
+  ownerCode: string,
+  devastate: boolean,
+): Promise<Province> {
+  await ensureSchema();
+  const db = await getDb();
+  if (devastate) {
+    await db.execute(
+      `UPDATE provinces
+         SET owner_code = ?, defender_hp = 0,
+             manpower_prod = 0, resource_prod = 0, production = 0,
+             research_prod = 0, culture_prod = 0
+       WHERE id = ?`,
+      [ownerCode, provinceId],
+    );
+  } else {
+    await db.execute(
+      'UPDATE provinces SET owner_code = ?, defender_hp = 0 WHERE id = ?',
+      [ownerCode, provinceId],
+    );
+  }
+  const rows = await db.select<ProvinceRow[]>(
+    'SELECT * FROM provinces WHERE id = ?',
+    [provinceId],
+  );
+  return rowToProvince(rows[0]);
 }

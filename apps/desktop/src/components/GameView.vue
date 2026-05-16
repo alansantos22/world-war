@@ -13,6 +13,7 @@ import {
   seasonForMonth,
   SEASONS,
   ClimateZone,
+  Season,
 } from "../game/climate";
 import { formatTurnDate, turnDate } from "../game/turns";
 import {
@@ -21,6 +22,7 @@ import {
   advanceTurn,
   regenerateMap,
   getSave,
+  takeTerritory,
   type Province,
   type GameSave,
 } from "../game/world";
@@ -28,23 +30,45 @@ import { renameSave } from "../game/saves";
 import {
   SQUAD_COST,
   SQUAD_MANPOWER_COST,
+  ATTACKS_PER_TURN,
   TROOP_TYPES,
   squadForce,
-  squadUpkeep,
+  squadUpkeepAt,
+  squadName,
   maxTroops,
+  levelProgress,
   isSquadReady,
   canSquadMove,
+  canSquadAttack,
+  attacksLeft,
   loadSquads,
   createSquad,
   deleteSquad,
   moveSquad,
+  renameSquad,
   loadRecruitOrders,
   queueRecruit,
   cancelRecruit,
+  deleteTroop,
+  moveTroop,
+  loadCityTroops,
+  moveCityTroopsToSquad,
   type Squad,
   type RecruitOrder,
+  type CityTroop,
   type TroopKind,
 } from "../game/squads";
+import {
+  battleModifiers,
+  moralForceDelta,
+  defenderTroopCount,
+  executeBattle,
+  loadBattleLogs,
+  CAPITAL_BONUS_RANGE,
+  type BattleEnv,
+  type BattleReport,
+  type BattleLog,
+} from "../game/battle";
 import { loadSettings } from "../settings";
 
 const props = defineProps<{ saveId: number }>();
@@ -75,8 +99,40 @@ const busySquad = ref(false);
 const recruitOrders = ref<RecruitOrder[]>([]);
 /** `true` quando o painel da província mostra o recrutamento, não a info. */
 const recruitOpen = ref(false);
-/** Esquadrão alvo escolhido no painel de recrutamento. */
-const recruitSquadId = ref<number | null>(null);
+
+// ===== Cidade (inventário de tropas) =====
+/** Tropas guardadas no inventário das cidades. */
+const cityTroops = ref<CityTroop[]>([]);
+/** `true` enquanto o painel "Ver cidade" (direita) está aberto. */
+const cityPanelOpen = ref(false);
+/** Aba ativa do painel da cidade. */
+const cityTab = ref<"inventory">("inventory");
+/** Ids das tropas do inventário marcadas para mover. */
+const pickedCityTroops = ref<number[]>([]);
+/** Tropas aguardando a escolha de esquadrão ("Qual esquadrão?"). */
+const askSquadFor = ref<number[] | null>(null);
+
+// ===== Combate =====
+/** Esquadrão escolhido como atacante no tile selecionado. */
+const attackerId = ref<number | null>(null);
+/** `true` enquanto o diálogo de tomar território está aberto. */
+const showTake = ref(false);
+/** Relatório da última batalha — exibido no modal de batalha. */
+const battleModal = ref<BattleReport | null>(null);
+/** `true` enquanto os dados estão "girando" na animação da batalha. */
+const diceRolling = ref(false);
+/** Faces aleatórias dos dados durante a animação. */
+const rollingFaces = ref([1, 1, 1, 1]);
+/** Histórico de batalhas da partida. */
+const battleLogs = ref<BattleLog[]>([]);
+
+// ===== Painel do exército =====
+/** `true` enquanto o modal do exército (esquadrões / batalhas) está aberto. */
+const showArmy = ref(false);
+/** Aba ativa do modal do exército. */
+const armyTab = ref<"squads" | "battles">("squads");
+/** Tropa selecionada para ser movida entre esquadrões. */
+const moveTroopId = ref<number | null>(null);
 
 const mode = ref<"political" | "resource" | "climate">("political");
 const selected = ref<Province | null>(null);
@@ -87,6 +143,7 @@ type PanelId = "nations" | "alignments";
 const activePanel = ref<PanelId | null>(null);
 function togglePanel(p: PanelId) {
   activePanel.value = activePanel.value === p ? null : p;
+  if (activePanel.value) cityPanelOpen.value = false;
 }
 
 // ===== Nações da partida =====
@@ -235,19 +292,23 @@ function onProvinceClick(p: Province) {
   // Em modo de movimento: clicar num tile vizinho move o esquadrão para lá.
   if (moveMode.value) {
     const sq = moveMode.value;
-    if (isAdjacent(p, sq)) {
+    if (moveTargets.value.some((t) => t.id === p.id)) {
       void doMove(sq, p);
       return;
     }
     moveMode.value = null;
   }
   recruitOpen.value = false;
+  showTake.value = false;
+  cityPanelOpen.value = false;
   selected.value = p;
 }
 function onOceanClick() {
   if (panMoved.value) return;
   moveMode.value = null;
   recruitOpen.value = false;
+  showTake.value = false;
+  cityPanelOpen.value = false;
   selected.value = null;
 }
 
@@ -265,6 +326,8 @@ async function load() {
     factions.value = await loadFactions(props.saveId);
     squads.value = await loadSquads(props.saveId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
+    cityTroops.value = await loadCityTroops(props.saveId);
+    battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -278,10 +341,17 @@ async function newMap() {
   selected.value = null;
   moveMode.value = null;
   recruitOpen.value = false;
+  showTake.value = false;
+  showArmy.value = false;
+  cityPanelOpen.value = false;
+  battleModal.value = null;
+  moveTroopId.value = null;
   try {
     provinces.value = await regenerateMap(props.saveId);
     squads.value = await loadSquads(props.saveId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
+    cityTroops.value = await loadCityTroops(props.saveId);
+    battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -299,6 +369,7 @@ async function nextTurn() {
     factions.value = res.factions;
     squads.value = await loadSquads(props.saveId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
+    cityTroops.value = await loadCityTroops(props.saveId);
     flashToast(`Turno ${res.turn} — ${formatTurnDate(res.turn)}`);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -341,12 +412,31 @@ function squadTileColor(t: { squads: Squad[] }): string {
     : "#dfe3ea";
 }
 
-/** Tiles vizinhos válidos para onde o esquadrão em movimento pode ir. */
-const moveTargets = computed<Province[]>(() =>
-  moveMode.value
-    ? provinces.value.filter((p) => isAdjacent(p, moveMode.value!))
-    : [],
-);
+/** Tiles ocupados por esquadrões de outras facções — bloqueiam o movimento. */
+const blockedTiles = computed(() => {
+  const set = new Set<string>();
+  for (const s of squads.value) {
+    if (s.ownerCode !== game.value?.playerCode) set.add(`${s.x},${s.y}`);
+  }
+  return set;
+});
+
+/**
+ * Tiles vizinhos válidos para onde o esquadrão em movimento pode ir: não se
+ * entra em território de outra facção nem em tiles ocupados por esquadrões de
+ * outras facções (regra de movimento — ver `GAME_DESIGN.md`).
+ */
+const moveTargets = computed<Province[]>(() => {
+  const m = moveMode.value;
+  if (!m) return [];
+  const code = game.value?.playerCode;
+  return provinces.value.filter(
+    (p) =>
+      isAdjacent(p, m) &&
+      (p.ownerCode == null || p.ownerCode === code) &&
+      !blockedTiles.value.has(`${p.x},${p.y}`),
+  );
+});
 
 /** Monta um esquadrão na província selecionada (custa `SQUAD_COST`). */
 async function createSquadHere() {
@@ -419,24 +509,24 @@ function isSquadOnGlacial(s: Squad): boolean {
   );
 }
 
+/** `true` se o esquadrão está num tile da própria facção (manutenção pela metade). */
+function isSquadOnOwnTile(s: Squad): boolean {
+  return (
+    provinceByTile.value.get(`${s.x},${s.y}`)?.ownerCode === s.ownerCode
+  );
+}
+
 /** Esquadrões do jogador na província selecionada. */
 const playerSquadsHere = computed<Squad[]>(() =>
   squadsOnSelected.value.filter((s) => s.ownerCode === game.value?.playerCode),
 );
 
-/** `true` se dá para recrutar na província selecionada (cidade sua + esquadrão). */
+/** `true` se dá para recrutar na província selecionada (uma cidade sua). */
 const canRecruitHere = computed(
   () =>
     !!selected.value &&
-    selected.value.ownerCode === game.value?.playerCode &&
-    playerSquadsHere.value.length > 0,
+    selected.value.ownerCode === game.value?.playerCode,
 );
-
-/** Esquadrão alvo do recrutamento (o escolhido, ou o 1º do tile). */
-const recruitTarget = computed<Squad | null>(() => {
-  const list = playerSquadsHere.value;
-  return list.find((s) => s.id === recruitSquadId.value) ?? list[0] ?? null;
-});
 
 /** Ordens de recrutamento na fila da província selecionada. */
 const recruitOrdersHere = computed<RecruitOrder[]>(() =>
@@ -446,16 +536,6 @@ const recruitOrdersHere = computed<RecruitOrder[]>(() =>
       )
     : [],
 );
-
-/** Quantas ordens estão na fila de um esquadrão. */
-function pendingOrdersFor(squadId: number): number {
-  return recruitOrders.value.filter((o) => o.squadId === squadId).length;
-}
-
-/** Tropas atuais somadas às que estão na fila de um esquadrão. */
-function troopsWithPending(s: Squad): number {
-  return s.troops.length + pendingOrdersFor(s.id);
-}
 
 /** Turnos restantes para concluir uma ordem na cidade selecionada. */
 function recruitEta(o: RecruitOrder): number {
@@ -471,35 +551,20 @@ function troopBuildTurns(kind: TroopKind): number {
   return Math.ceil(TROOP_TYPES[kind].productionCost / prod);
 }
 
-/** `true` se o esquadrão alvo já está no limite de tropas (tropas + fila). */
-const recruitTargetFull = computed(
-  () =>
-    !!recruitTarget.value &&
-    troopsWithPending(recruitTarget.value) >=
-      maxTroops(recruitTarget.value.commander.stars),
-);
-
 /** Abre o painel de recrutamento da cidade selecionada. */
 function openRecruit() {
   if (!canRecruitHere.value) return;
-  if (
-    recruitSquadId.value == null ||
-    !playerSquadsHere.value.some((s) => s.id === recruitSquadId.value)
-  ) {
-    recruitSquadId.value = playerSquadsHere.value[0]?.id ?? null;
-  }
   recruitOpen.value = true;
 }
 
-/** Enfileira o recrutamento de uma tropa para o esquadrão alvo. */
+/** Enfileira o recrutamento de uma tropa para o inventário da cidade. */
 async function doRecruit(kind: TroopKind) {
   const p = selected.value;
-  const target = recruitTarget.value;
-  if (!p || !p.ownerCode || !target) return;
+  if (!p || !p.ownerCode) return;
   busySquad.value = true;
   err.value = "";
   try {
-    await queueRecruit(props.saveId, p.ownerCode, p.x, p.y, target.id, kind);
+    await queueRecruit(props.saveId, p.ownerCode, p.x, p.y, kind);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
     factions.value = await loadFactions(props.saveId);
     flashToast(`${TROOP_TYPES[kind].label} adicionada à fila.`);
@@ -518,6 +583,318 @@ async function doCancelRecruit(orderId: number) {
     await cancelRecruit(orderId);
     recruitOrders.value = await loadRecruitOrders(props.saveId);
     factions.value = await loadFactions(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+// ===== Cidade / inventário de tropas =====
+
+/** Tropas no inventário da cidade selecionada. */
+const cityTroopsHere = computed<CityTroop[]>(() =>
+  selected.value
+    ? cityTroops.value.filter(
+        (t) => t.x === selected.value!.x && t.y === selected.value!.y,
+      )
+    : [],
+);
+
+/** Abre o painel "Ver cidade" da província selecionada. */
+function openCity() {
+  if (!selected.value || selected.value.ownerCode !== game.value?.playerCode) {
+    return;
+  }
+  pickedCityTroops.value = [];
+  askSquadFor.value = null;
+  cityTab.value = "inventory";
+  activePanel.value = null;
+  cityPanelOpen.value = true;
+}
+
+/**
+ * Move tropas do inventário para um esquadrão: com 1 esquadrão na cidade vai
+ * direto; com vários, pergunta qual; sem nenhum, não faz nada.
+ */
+function sendTroopsToSquad(troopIds: number[]) {
+  if (troopIds.length === 0) return;
+  const here = playerSquadsHere.value;
+  if (here.length === 0) return;
+  if (here.length === 1) void doSendTroops(troopIds, here[0].id);
+  else askSquadFor.value = [...troopIds];
+}
+
+/** Conclui o envio de tropas para o esquadrão escolhido. */
+async function doSendTroops(troopIds: number[], squadId: number) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await moveCityTroopsToSquad(troopIds, squadId);
+    cityTroops.value = await loadCityTroops(props.saveId);
+    squads.value = await loadSquads(props.saveId);
+    pickedCityTroops.value = pickedCityTroops.value.filter(
+      (id) => !troopIds.includes(id),
+    );
+    askSquadFor.value = null;
+    flashToast("Tropas movidas para o esquadrão.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+// ===== Combate =====
+
+/** Esquadrões inimigos (não do jogador) na província selecionada. */
+const enemySquadsHere = computed<Squad[]>(() =>
+  squadsOnSelected.value.filter((s) => s.ownerCode !== game.value?.playerCode),
+);
+
+/** `true` se o tile não é da sua facção e você tem um esquadrão nele. */
+const isContestedTile = computed(
+  () =>
+    !!selected.value &&
+    selected.value.ownerCode !== game.value?.playerCode &&
+    playerSquadsHere.value.length > 0,
+);
+
+/** Esquadrão atacante (o escolhido, ou o 1º do jogador no tile). */
+const attackerSquad = computed<Squad | null>(() => {
+  const list = playerSquadsHere.value;
+  return list.find((s) => s.id === attackerId.value) ?? list[0] ?? null;
+});
+
+/** Distância de Chebyshev (8 direções) entre duas células. */
+function chebyshev(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+}
+
+/** Capital de uma facção (para o bônus de proximidade na batalha). */
+function capitalOf(code: string | null): Province | undefined {
+  if (!code) return undefined;
+  return provinces.value.find((p) => p.isCapital && p.ownerCode === code);
+}
+
+/** Monta o ambiente de batalha do tile selecionado para uma facção. */
+function battleEnvFor(code: string | null): BattleEnv {
+  const p = selected.value;
+  const cap = capitalOf(code);
+  return {
+    climate: p?.climate ?? ClimateZone.AMENO,
+    season: p
+      ? seasonForMonth(currentMonth.value, hemisphereOf(p.y))
+      : Season.PRIMAVERA,
+    nearCapital: !!p && !!cap && chebyshev(p, cap) <= CAPITAL_BONUS_RANGE,
+  };
+}
+
+/** Ambiente de batalha para o atacante (a facção do jogador). */
+const attackerEnv = computed(() =>
+  battleEnvFor(game.value?.playerCode ?? null),
+);
+
+/** Modificadores de ambiente do atacante (mostrados no painel de Combate). */
+const battleMods = computed(() => battleModifiers(attackerEnv.value));
+
+/** Variação de força pela moral do esquadrão atacante (em %). */
+const attackerMoralPct = computed(() =>
+  attackerSquad.value
+    ? Math.round(moralForceDelta(attackerSquad.value.moral) * 100)
+    : 0,
+);
+
+/** `true` se o território neutro selecionado já pode ser tomado. */
+const canTakeTerritory = computed(
+  () =>
+    !!selected.value &&
+    !selected.value.ownerCode &&
+    selected.value.defenderHp === 0 &&
+    playerSquadsHere.value.length > 0,
+);
+
+/** Recarrega províncias, esquadrões e logs após uma ação de combate. */
+async function reloadBattleState() {
+  provinces.value = await loadMap(props.saveId);
+  squads.value = await loadSquads(props.saveId);
+  battleLogs.value = await loadBattleLogs(props.saveId);
+  if (selected.value) {
+    selected.value =
+      provinces.value.find((p) => p.id === selected.value!.id) ?? null;
+  }
+}
+
+let diceTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Anima os dados por ~1,1s antes de revelar o resultado da batalha. */
+function rollDiceAnimation() {
+  diceRolling.value = true;
+  clearInterval(diceTimer);
+  diceTimer = setInterval(() => {
+    rollingFaces.value = rollingFaces.value.map(
+      () => 1 + Math.floor(Math.random() * 6),
+    );
+  }, 70);
+  setTimeout(() => {
+    clearInterval(diceTimer);
+    diceRolling.value = false;
+  }, 1100);
+}
+
+/** Resolve uma batalha do esquadrão atacante contra um defensor. */
+async function runBattle(
+  defender: { kind: "squad"; squad: Squad } | { kind: "territory" },
+) {
+  const p = selected.value;
+  const atk = attackerSquad.value;
+  if (!p || !atk || !canSquadAttack(atk, turn.value)) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    const defCode =
+      defender.kind === "squad" ? defender.squad.ownerCode : null;
+    const report = await executeBattle({
+      saveId: props.saveId,
+      turn: turn.value,
+      province: p,
+      attacker: atk,
+      attackerEnv: attackerEnv.value,
+      defenderEnv: battleEnvFor(defCode),
+      defender,
+    });
+    await reloadBattleState();
+    battleModal.value = report;
+    rollDiceAnimation();
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Ataca as tropas de defesa do território neutro selecionado. */
+function doAttackTerritory() {
+  void runBattle({ kind: "territory" });
+}
+
+/** Ataca um esquadrão inimigo no tile selecionado. */
+function doAttackSquad(enemy: Squad) {
+  void runBattle({ kind: "squad", squad: enemy });
+}
+
+/** Fecha o modal de batalha. */
+function closeBattleModal() {
+  clearInterval(diceTimer);
+  diceRolling.value = false;
+  battleModal.value = null;
+}
+
+/** Toma o território neutro selecionado — ocupando ou devastando. */
+async function doTakeTerritory(devastate: boolean) {
+  const p = selected.value;
+  if (!p || !game.value?.playerCode) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await takeTerritory(p.id, game.value.playerCode, devastate);
+    provinces.value = await loadMap(props.saveId);
+    selected.value = provinces.value.find((q) => q.id === p.id) ?? null;
+    showTake.value = false;
+    flashToast(
+      devastate ? "Território devastado e tomado." : "Território ocupado.",
+    );
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+// ===== Painel do exército =====
+
+/** Todos os esquadrões do jogador. */
+const playerSquads = computed<Squad[]>(() =>
+  squads.value.filter((s) => s.ownerCode === game.value?.playerCode),
+);
+
+/** Abre o modal do exército. */
+function openArmy() {
+  moveTroopId.value = null;
+  armyTab.value = "squads";
+  showArmy.value = true;
+}
+
+/** Esquadrão de origem da tropa que está sendo movida. */
+const moveTroopSource = computed<Squad | null>(() => {
+  if (moveTroopId.value == null) return null;
+  return (
+    playerSquads.value.find((s) =>
+      s.troops.some((t) => t.id === moveTroopId.value),
+    ) ?? null
+  );
+});
+
+/** `true` se um esquadrão pode receber a tropa em movimento (mesmo tile). */
+function canReceiveTroop(s: Squad): boolean {
+  const src = moveTroopSource.value;
+  return (
+    !!src &&
+    s.id !== src.id &&
+    s.x === src.x &&
+    s.y === src.y &&
+    s.troops.length < maxTroops(s.commander.stars)
+  );
+}
+
+/** Exclui uma tropa de um esquadrão. */
+async function doDeleteTroop(troopId: number) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await deleteTroop(troopId);
+    if (moveTroopId.value === troopId) moveTroopId.value = null;
+    squads.value = await loadSquads(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Move a tropa selecionada para um esquadrão de destino. */
+async function doMoveTroop(targetSquadId: number) {
+  if (moveTroopId.value == null) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await moveTroop(moveTroopId.value, targetSquadId);
+    moveTroopId.value = null;
+    squads.value = await loadSquads(props.saveId);
+    flashToast("Tropa transferida.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Texto de level e progresso de XP de uma unidade. */
+function levelLabel(xp: number): string {
+  const p = levelProgress(xp);
+  return p.needed > 0
+    ? `Nv. ${p.level} · ${p.current}/${p.needed} XP`
+    : `Nv. ${p.level} (máx.)`;
+}
+
+/** Renomeia um esquadrão a partir do input do modal do exército. */
+async function doRenameSquad(squadId: number, ev: Event) {
+  const name = (ev.target as HTMLInputElement).value;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await renameSquad(squadId, name);
+    squads.value = await loadSquads(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -990,6 +1367,14 @@ function provinceFill(p: Province): string {
         >
           🎖️
         </button>
+        <button
+          class="side-btn"
+          :class="{ on: showArmy }"
+          title="Exército"
+          @click="openArmy"
+        >
+          🪖
+        </button>
         <div class="side-div"></div>
         <button
           class="side-btn"
@@ -1135,16 +1520,27 @@ function provinceFill(p: Province): string {
             </span>
           </div>
 
-          <!-- Força de batalha do território (tomada hostil) -->
-          <div class="battle-line">
-            <span class="bf-icon">⚔️</span>
+          <!-- Defensores do território neutro -->
+          <div v-if="!selected.ownerCode" class="battle-line">
+            <span class="bf-icon">{{
+              selected.defenderHp > 0 ? "🛡️" : "🏳️"
+            }}</span>
             <div class="bf-info">
-              <span class="bf-label">Força de batalha</span>
-              <span class="bf-val">{{ selected.battleForce }}</span>
+              <span class="bf-label">
+                {{
+                  selected.defenderHp > 0
+                    ? "Defensores do território"
+                    : "Território sem defensores"
+                }}
+              </span>
+              <span v-if="selected.defenderHp > 0" class="bf-val">
+                {{ defenderTroopCount(selected.defenderHp) }} tropas ·
+                {{ selected.defenderHp }} HP
+              </span>
+              <span v-else class="bf-val bf-open">
+                Livre para ser tomado
+              </span>
             </div>
-            <span v-if="selected.conquered" class="bf-tag">
-              Tomado de outra facção
-            </span>
           </div>
 
           <div class="prod-head">Produção por turno</div>
@@ -1185,8 +1581,11 @@ function provinceFill(p: Province): string {
               <span class="squad-bar"></span>
               <div class="squad-body">
                 <div class="squad-title">
-                  <span>⚔️ Esquadrão #{{ s.id }}</span>
-                  <span class="squad-stars" title="Estrelas do comandante">
+                  <span>⚔️ {{ squadName(s) }}</span>
+                  <span
+                    class="squad-stars"
+                    title="Talento do comandante (estrelas)"
+                  >
                     {{ "★".repeat(s.commander.stars) }}
                   </span>
                   <span
@@ -1211,8 +1610,18 @@ function provinceFill(p: Province): string {
                   <span title="Defesa do comandante">
                     🛡️ {{ s.commander.defense }}
                   </span>
-                  <span title="Manutenção por turno">
-                    💰 {{ squadUpkeep(s) }}/turno
+                  <span title="Moral do esquadrão">💪 {{ s.moral }}%</span>
+                  <span title="Ataques restantes neste turno">
+                    🎯 {{ attacksLeft(s) }}/{{ ATTACKS_PER_TURN }}
+                  </span>
+                  <span
+                    :title="
+                      isSquadOnOwnTile(s)
+                        ? 'Manutenção por turno (metade — em território seu)'
+                        : 'Manutenção por turno'
+                    "
+                  >
+                    💰 {{ squadUpkeepAt(s, isSquadOnOwnTile(s)) }}/turno
                   </span>
                 </div>
                 <div class="squad-acts">
@@ -1246,9 +1655,20 @@ function provinceFill(p: Province): string {
                   </template>
                   <button
                     v-else
-                    class="sbtn"
-                    disabled
-                    title="Sistema de batalha — em breve"
+                    class="sbtn attack"
+                    :disabled="
+                      busySquad ||
+                      !attackerSquad ||
+                      !canSquadAttack(attackerSquad, turn)
+                    "
+                    :title="
+                      !attackerSquad
+                        ? 'É preciso um esquadrão seu neste tile'
+                        : !canSquadAttack(attackerSquad, turn)
+                          ? 'Atacante sem ataques ou em preparação'
+                          : 'Atacar este esquadrão'
+                    "
+                    @click="doAttackSquad(s)"
                   >
                     ⚔️ Atacar
                   </button>
@@ -1285,26 +1705,122 @@ function provinceFill(p: Province): string {
             </p>
             <button
               class="squad-recruit"
-              :disabled="!canRecruitHere"
-              :title="
-                canRecruitHere
-                  ? 'Abrir o recrutamento desta cidade'
-                  : 'É preciso um esquadrão seu neste tile para recrutar'
-              "
+              :disabled="busySquad"
+              title="Recrutar tropas para o inventário da cidade"
               @click="openRecruit"
             >
               🪖 Recrutamento
             </button>
+            <button
+              class="squad-city"
+              :disabled="busySquad"
+              title="Abrir o painel da cidade (inventário de tropas)"
+              @click="openCity"
+            >
+              🏛️ Ver cidade
+            </button>
           </template>
 
-          <!-- Tomar território de forma hostil (sistema de batalha — em breve) -->
+          <!-- Combate: o tile não é da sua facção e você tem esquadrão nele -->
+          <template v-if="isContestedTile">
+            <div class="squad-head"><span>Combate</span></div>
+
+            <!-- Escolha do esquadrão atacante (quando há mais de um) -->
+            <div v-if="playerSquadsHere.length > 1" class="rc-block">
+              <div class="rc-label">Esquadrão atacante</div>
+              <div class="rc-squads">
+                <button
+                  v-for="s in playerSquadsHere"
+                  :key="s.id"
+                  class="rc-squad"
+                  :class="{ on: attackerSquad?.id === s.id }"
+                  @click="attackerId = s.id"
+                >
+                  ⚔️ {{ squadName(s) }}
+                  <span class="rc-squad-sub">
+                    {{ attacksLeft(s) }}/{{ ATTACKS_PER_TURN }} ataques
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Modificadores de força do atacante -->
+            <div class="rc-block">
+              <div class="rc-label">Modificadores do atacante</div>
+              <div class="env-mods">
+                <div
+                  v-for="m in battleMods"
+                  :key="m.label"
+                  class="env-mod"
+                  :class="m.delta > 0 ? 'up' : 'down'"
+                >
+                  <span>{{ m.label }}</span>
+                  <span>
+                    {{ m.delta > 0 ? "+" : ""
+                    }}{{ Math.round(m.delta * 100) }}%
+                  </span>
+                </div>
+                <div
+                  class="env-mod"
+                  :class="attackerMoralPct >= 0 ? 'up' : 'down'"
+                >
+                  <span>
+                    Moral{{
+                      attackerSquad ? " (" + attackerSquad.moral + "%)" : ""
+                    }}
+                  </span>
+                  <span>
+                    {{ attackerMoralPct >= 0 ? "+" : "" }}{{ attackerMoralPct }}%
+                  </span>
+                </div>
+                <p class="env-none">
+                  🎲 Os 2 dados de cada lado são lançados na batalha.
+                </p>
+              </div>
+            </div>
+
+            <!-- Atacar a região (tile neutro com defensores) -->
+            <button
+              v-if="!selected.ownerCode && selected.defenderHp > 0"
+              class="squad-create attack-region"
+              :disabled="
+                busySquad ||
+                !attackerSquad ||
+                !canSquadAttack(attackerSquad, turn)
+              "
+              @click="doAttackTerritory"
+            >
+              ⚔️ Atacar a região
+            </button>
+            <p
+              v-if="
+                !selected.ownerCode &&
+                selected.defenderHp > 0 &&
+                attackerSquad &&
+                !canSquadAttack(attackerSquad, turn)
+              "
+              class="squad-warn"
+            >
+              O esquadrão atacante não tem ataques neste turno.
+            </p>
+            <p
+              v-else-if="
+                selected.ownerCode && enemySquadsHere.length === 0
+              "
+              class="squad-empty rc-pad"
+            >
+              Nenhum alvo para atacar neste território.
+            </p>
+          </template>
+
+          <!-- Tomar território neutro já sem defensores -->
           <button
-            v-if="!selected.ownerCode"
-            class="squad-take"
-            disabled
-            title="Sistema de batalha — em breve"
+            v-if="canTakeTerritory"
+            class="squad-create take-territory"
+            :disabled="busySquad"
+            @click="showTake = true"
           >
-            🚩 Tomar território (em breve)
+            🚩 Tomar território
           </button>
           </template>
 
@@ -1327,29 +1843,10 @@ function provinceFill(p: Province): string {
               produção {{ selected.production }}/turno
             </p>
 
-            <!-- Esquadrão que receberá as tropas -->
-            <div v-if="playerSquadsHere.length" class="rc-block">
-              <div class="rc-label">Esquadrão que vai receber a tropa</div>
-              <div class="rc-squads">
-                <button
-                  v-for="s in playerSquadsHere"
-                  :key="s.id"
-                  class="rc-squad"
-                  :class="{ on: recruitTarget?.id === s.id }"
-                  @click="recruitSquadId = s.id"
-                >
-                  ⚔️ #{{ s.id }}
-                  <span class="rc-squad-sub">
-                    {{ troopsWithPending(s) }}/{{
-                      maxTroops(s.commander.stars)
-                    }}
-                    tropas
-                  </span>
-                </button>
-              </div>
-            </div>
-            <p v-else class="squad-empty rc-pad">
-              Nenhum esquadrão seu neste território.
+            <p class="rc-pad rc-note">
+              As tropas recrutadas vão para o <strong>inventário</strong> desta
+              cidade. Use <strong>Ver cidade</strong> para enviá-las a um
+              esquadrão.
             </p>
 
             <!-- Tropas disponíveis para recrutamento -->
@@ -1390,8 +1887,6 @@ function provinceFill(p: Province): string {
                 class="squad-create rc-recruit-btn"
                 :disabled="
                   busySquad ||
-                  !recruitTarget ||
-                  recruitTargetFull ||
                   (playerFaction?.money ?? 0) <
                     TROOP_TYPES.INFANTARIA.moneyCost ||
                   (playerFaction?.manpower ?? 0) <
@@ -1401,16 +1896,12 @@ function provinceFill(p: Province): string {
               >
                 Recrutar infantaria
               </button>
-              <p v-if="recruitTargetFull" class="squad-warn">
-                O esquadrão alvo já atingiu o limite de tropas.
-              </p>
               <p
-                v-else-if="
-                  recruitTarget &&
-                  ((playerFaction?.money ?? 0) <
+                v-if="
+                  (playerFaction?.money ?? 0) <
                     TROOP_TYPES.INFANTARIA.moneyCost ||
-                    (playerFaction?.manpower ?? 0) <
-                      TROOP_TYPES.INFANTARIA.manpowerCost)
+                  (playerFaction?.manpower ?? 0) <
+                    TROOP_TYPES.INFANTARIA.manpowerCost
                 "
                 class="squad-warn"
               >
@@ -1433,7 +1924,7 @@ function provinceFill(p: Province): string {
                 <div class="rc-order-info">
                   <div class="rc-order-name">
                     {{ TROOP_TYPES[o.kind].label }}
-                    <span class="dim">→ Esquadrão #{{ o.squadId }}</span>
+                    <span class="dim">→ inventário da cidade</span>
                   </div>
                   <div class="rc-progress">
                     <div
@@ -1465,6 +1956,107 @@ function provinceFill(p: Province): string {
               </p>
             </div>
           </template>
+        </section>
+      </Transition>
+
+      <!-- Painel da cidade (direita) — abas; hoje, o inventário de tropas -->
+      <Transition name="slide">
+        <section
+          v-if="cityPanelOpen && selected"
+          class="card city-panel"
+        >
+          <div class="card-head">
+            <div class="head-title">🏛️ {{ selected.name }}</div>
+            <button class="x" @click="cityPanelOpen = false">✕</button>
+          </div>
+          <div class="city-tabs">
+            <button
+              :class="{ on: cityTab === 'inventory' }"
+              @click="cityTab = 'inventory'"
+            >
+              Inventário
+            </button>
+          </div>
+          <div class="city-body">
+            <!-- Recursos da cidade (placeholder — sistema de produção em breve) -->
+            <div class="ci-label">Recursos da cidade</div>
+            <div class="ci-resources">
+              <span
+                v-for="s in TERRITORY_STATS"
+                :key="s.key"
+                class="ci-res"
+                :title="s.label"
+              >
+                {{ s.icon }} 0
+              </span>
+            </div>
+            <p class="ci-note">
+              O estoque de recursos da cidade chega com o sistema de produção.
+            </p>
+
+            <!-- Inventário de tropas -->
+            <div class="ci-label">
+              <span>Tropas no inventário</span>
+              <span class="squad-count">{{ cityTroopsHere.length }}</span>
+            </div>
+            <p v-if="cityTroopsHere.length === 0" class="squad-empty">
+              Nenhuma tropa no inventário — recrute tropas para enchê-lo.
+            </p>
+            <div
+              v-for="t in cityTroopsHere"
+              :key="t.id"
+              class="ci-troop"
+              :class="{ picked: pickedCityTroops.includes(t.id) }"
+            >
+              <input
+                type="checkbox"
+                :value="t.id"
+                v-model="pickedCityTroops"
+              />
+              <span class="ci-troop-icon">{{ TROOP_TYPES[t.kind].icon }}</span>
+              <span class="ci-troop-info">
+                <span class="ci-troop-name">
+                  {{ TROOP_TYPES[t.kind].label }}
+                </span>
+                <span class="ci-troop-sub">
+                  ❤️ {{ t.hp }}/{{ t.maxHp }}
+                  <span class="dimsep">·</span>
+                  {{ levelLabel(t.xp) }}
+                </span>
+              </span>
+              <button
+                class="mini-btn"
+                :disabled="busySquad || playerSquadsHere.length === 0"
+                :title="
+                  playerSquadsHere.length === 0
+                    ? 'Nenhum esquadrão estacionado na cidade'
+                    : 'Enviar esta tropa a um esquadrão'
+                "
+                @click="sendTroopsToSquad([t.id])"
+              >
+                Add ao esquadrão
+              </button>
+            </div>
+
+            <button
+              v-if="cityTroopsHere.length > 0"
+              class="squad-create ci-move-btn"
+              :disabled="
+                busySquad ||
+                pickedCityTroops.length === 0 ||
+                playerSquadsHere.length === 0
+              "
+              @click="sendTroopsToSquad(pickedCityTroops)"
+            >
+              Mover {{ pickedCityTroops.length }} selecionada(s) para esquadrão
+            </button>
+            <p
+              v-if="cityTroopsHere.length > 0 && playerSquadsHere.length === 0"
+              class="squad-warn"
+            >
+              É preciso um esquadrão estacionado na cidade para receber tropas.
+            </p>
+          </div>
         </section>
       </Transition>
 
@@ -1594,6 +2186,407 @@ function provinceFill(p: Province): string {
             <div class="modal-actions">
               <button @click="showExit = false">Continuar jogando</button>
               <button class="on" @click="emit('exit')">Sair para o menu</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Diálogo: tomar território -->
+      <Transition name="fade">
+        <div
+          v-if="showTake"
+          class="modal-scrim"
+          @click.self="showTake = false"
+        >
+          <div class="modal">
+            <h3>Tomar território</h3>
+            <p class="modal-text">
+              <strong>{{ selected?.name }}</strong> está sem defensores —
+              escolha como tomá-lo:
+            </p>
+            <div class="take-options">
+              <button
+                class="take-opt occupy"
+                :disabled="busySquad"
+                @click="doTakeTerritory(false)"
+              >
+                <span class="take-opt-title">🏳️ Ocupar</span>
+                <span class="take-opt-desc">
+                  O território passa a ser seu, com a produção intacta.
+                </span>
+              </button>
+              <button
+                class="take-opt devastate"
+                :disabled="busySquad"
+                @click="doTakeTerritory(true)"
+              >
+                <span class="take-opt-title">🔥 Devastar</span>
+                <span class="take-opt-desc">
+                  O território é seu, mas toda a produção por turno
+                  (manpower, recurso, produção, pesquisa e cultura) é zerada.
+                </span>
+              </button>
+            </div>
+            <div class="modal-actions">
+              <button @click="showTake = false">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Modal de batalha (com animação dos dados) -->
+      <Transition name="fade">
+        <div
+          v-if="battleModal"
+          class="modal-scrim"
+          @click.self="!diceRolling && closeBattleModal()"
+        >
+          <div class="modal battle-modal">
+            <h3>⚔️ Batalha em {{ battleModal.tileName }}</h3>
+
+            <div class="dice-row">
+              <div class="dice-side">
+                <span class="dice-tag atk">Atacante</span>
+                <div class="dice-pair">
+                  <span class="die" :class="{ rolling: diceRolling }">
+                    {{
+                      diceRolling
+                        ? rollingFaces[0]
+                        : battleModal.attackerDice[0]
+                    }}
+                  </span>
+                  <span class="die" :class="{ rolling: diceRolling }">
+                    {{
+                      diceRolling
+                        ? rollingFaces[1]
+                        : battleModal.attackerDice[1]
+                    }}
+                  </span>
+                </div>
+                <span v-if="!diceRolling" class="dice-sum">
+                  soma {{ battleModal.attacker.diceSum }}
+                  <span v-if="battleModal.attacker.tradition > 0" class="dice-trad">
+                    (+{{ battleModal.attacker.tradition }} tradição)
+                  </span>
+                </span>
+              </div>
+              <span class="dice-vs">⚔️</span>
+              <div class="dice-side">
+                <span class="dice-tag def">Defensor</span>
+                <div class="dice-pair">
+                  <span class="die" :class="{ rolling: diceRolling }">
+                    {{
+                      diceRolling
+                        ? rollingFaces[2]
+                        : battleModal.defenderDice[0]
+                    }}
+                  </span>
+                  <span class="die" :class="{ rolling: diceRolling }">
+                    {{
+                      diceRolling
+                        ? rollingFaces[3]
+                        : battleModal.defenderDice[1]
+                    }}
+                  </span>
+                </div>
+                <span v-if="!diceRolling" class="dice-sum">
+                  soma {{ battleModal.defender.diceSum }}
+                  <span v-if="battleModal.defender.tradition > 0" class="dice-trad">
+                    (+{{ battleModal.defender.tradition }} tradição)
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <p v-if="diceRolling" class="bt-rolling">Lançando os dados…</p>
+            <div v-else class="battle-result">
+              <div class="bt-sides">
+                <div
+                  v-for="side in [battleModal.attacker, battleModal.defender]"
+                  :key="side.label"
+                  class="bt-side"
+                  :class="{ destroyed: side.destroyed }"
+                >
+                  <div class="bt-side-name">{{ side.label }}</div>
+                  <div class="bt-force">
+                    força {{ side.baseForce }} →
+                    <strong>{{ side.effectiveForce }}</strong>
+                  </div>
+                  <div class="bt-mods">
+                    <span
+                      v-for="(m, i) in side.modifiers"
+                      :key="i"
+                      class="bt-mod"
+                      :class="m.pct >= 0 ? 'up' : 'down'"
+                    >
+                      {{ m.label }} {{ m.pct >= 0 ? "+" : ""
+                      }}{{ Math.round(m.pct) }}%
+                    </span>
+                  </div>
+                  <div class="bt-dmg">
+                    <span title="Dano sofrido">💥 −{{ side.damageTaken }}</span>
+                    <span title="Vida antes → depois">
+                      ❤️ {{ side.hpBefore }} → {{ side.hpAfter }}
+                    </span>
+                    <span v-if="side.troopsLost > 0" title="Tropas perdidas">
+                      🪖 −{{ side.troopsLost }}
+                    </span>
+                  </div>
+                  <div v-if="side.destroyed" class="bt-destroyed">
+                    DESTRUÍDO
+                  </div>
+                </div>
+              </div>
+              <p v-if="battleModal.xpGained > 0" class="bt-xp">
+                ⭐ +{{ battleModal.xpGained }} XP para o comandante e as
+                tropas do atacante.
+              </p>
+              <p v-if="battleModal.finalBattle" class="bt-final">
+                ⚑ Batalha final — um dos lados foi destruído.
+              </p>
+            </div>
+
+            <div class="modal-actions">
+              <button class="on" :disabled="diceRolling" @click="closeBattleModal">
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Modal do exército: esquadrões/tropas e histórico de batalhas -->
+      <Transition name="fade">
+        <div
+          v-if="showArmy"
+          class="modal-scrim"
+          @click.self="showArmy = false"
+        >
+          <div class="modal army-modal">
+            <div class="army-head">
+              <h3>🪖 Exército</h3>
+              <button class="x" @click="showArmy = false">✕</button>
+            </div>
+            <div class="army-tabs">
+              <button
+                :class="{ on: armyTab === 'squads' }"
+                @click="armyTab = 'squads'"
+              >
+                Esquadrões ({{ playerSquads.length }})
+              </button>
+              <button
+                :class="{ on: armyTab === 'battles' }"
+                @click="armyTab = 'battles'"
+              >
+                Batalhas ({{ battleLogs.length }})
+              </button>
+            </div>
+
+            <div class="army-body">
+              <!-- Aba: esquadrões e tropas -->
+              <template v-if="armyTab === 'squads'">
+                <p v-if="moveTroopId !== null" class="move-troop-banner">
+                  <span>
+                    Movendo uma tropa — clique em <strong>Receber tropa</strong>
+                    num esquadrão do mesmo tile.
+                  </span>
+                  <button @click="moveTroopId = null">Cancelar</button>
+                </p>
+                <p v-if="playerSquads.length === 0" class="army-empty">
+                  Você ainda não tem esquadrões.
+                </p>
+                <div v-for="s in playerSquads" :key="s.id" class="army-squad">
+                  <div class="army-squad-head">
+                    <input
+                      class="as-name-input"
+                      :value="s.name ?? ''"
+                      :placeholder="'Esquadrão #' + s.id"
+                      maxlength="40"
+                      :disabled="busySquad"
+                      @change="doRenameSquad(s.id, $event)"
+                    />
+                    <span class="as-meta">
+                      célula {{ s.x }},{{ s.y }}
+                      <span class="dimsep">·</span>
+                      💪 {{ s.moral }}%
+                      <span class="dimsep">·</span>
+                      ⚔️ {{ squadForce(s) }}
+                    </span>
+                    <button
+                      v-if="canReceiveTroop(s)"
+                      class="mini-btn receive"
+                      :disabled="busySquad"
+                      @click="doMoveTroop(s.id)"
+                    >
+                      Receber tropa
+                    </button>
+                  </div>
+                  <div class="army-cmd">
+                    <span class="ac-line">
+                      🎖️ Comandante
+                      <span class="dimsep">·</span>
+                      <span
+                        class="squad-stars"
+                        title="Talento (estrelas)"
+                      >{{ "★".repeat(s.commander.stars) }}</span>
+                      <span class="dimsep">·</span>
+                      {{ levelLabel(s.commander.xp) }}
+                    </span>
+                    <span class="ac-line dim">
+                      ❤️ {{ s.commander.hp }}/{{ s.commander.maxHp }}
+                      <span class="dimsep">·</span>
+                      ⚔️ {{ s.commander.force }}
+                      <span class="dimsep">·</span>
+                      🛡️ {{ s.commander.defense }}
+                      <span class="dimsep">·</span>
+                      🎌 tradição {{ s.commander.tradition }}
+                    </span>
+                  </div>
+                  <div
+                    v-for="t in s.troops"
+                    :key="t.id"
+                    class="army-troop"
+                  >
+                    <span class="at-name">
+                      {{ TROOP_TYPES[t.kind].icon }}
+                      {{ TROOP_TYPES[t.kind].label }}
+                    </span>
+                    <span class="at-stat">{{ levelLabel(t.xp) }}</span>
+                    <span class="at-stat">❤️ {{ t.hp }}/{{ t.maxHp }}</span>
+                    <span class="at-stat">⚔️ {{ t.force }}</span>
+                    <span class="at-acts">
+                      <button
+                        class="mini-btn"
+                        :class="{ on: moveTroopId === t.id }"
+                        :disabled="busySquad"
+                        @click="
+                          moveTroopId = moveTroopId === t.id ? null : t.id
+                        "
+                      >
+                        Mover
+                      </button>
+                      <button
+                        class="mini-btn danger"
+                        :disabled="busySquad"
+                        @click="doDeleteTroop(t.id)"
+                      >
+                        Excluir
+                      </button>
+                    </span>
+                  </div>
+                  <p v-if="s.troops.length === 0" class="army-empty sub">
+                    Sem tropas — só o comandante.
+                  </p>
+                </div>
+              </template>
+
+              <!-- Aba: histórico de batalhas -->
+              <template v-else>
+                <p v-if="battleLogs.length === 0" class="army-empty">
+                  Nenhuma batalha registrada ainda.
+                </p>
+                <div
+                  v-for="b in battleLogs"
+                  :key="b.logId"
+                  class="army-battle"
+                >
+                  <div class="ab-head">
+                    <span>Turno {{ b.turn }} · {{ b.tileName }}</span>
+                    <span v-if="b.finalBattle" class="ab-final">
+                      Batalha final
+                    </span>
+                  </div>
+                  <div class="ab-dice">
+                    🎲 {{ b.attackerDice.join("+")
+                    }}{{
+                      b.attacker.tradition > 0
+                        ? "+" + b.attacker.tradition
+                        : ""
+                    }}
+                    = {{ b.attacker.diceSum }}
+                    <span class="dimsep">×</span>
+                    {{ b.defenderDice.join("+")
+                    }}{{
+                      b.defender.tradition > 0
+                        ? "+" + b.defender.tradition
+                        : ""
+                    }}
+                    = {{ b.defender.diceSum }}
+                    <span v-if="b.xpGained > 0">
+                      <span class="dimsep">·</span>
+                      ⭐ +{{ b.xpGained }} XP
+                    </span>
+                  </div>
+                  <div class="ab-sides">
+                    <div
+                      v-for="side in [b.attacker, b.defender]"
+                      :key="side.label"
+                      class="ab-side"
+                      :class="{ destroyed: side.destroyed }"
+                    >
+                      <div class="ab-side-name">{{ side.label }}</div>
+                      <div class="ab-side-stat">
+                        força {{ side.baseForce }} → {{ side.effectiveForce }}
+                      </div>
+                      <div class="ab-side-stat">
+                        💥 −{{ side.damageTaken }}
+                        <span class="dimsep">·</span>
+                        ❤️ {{ side.hpBefore }}→{{ side.hpAfter }}
+                        <span class="dimsep">·</span>
+                        🪖 −{{ side.troopsLost }}
+                      </div>
+                      <div class="ab-mods">
+                        <span
+                          v-for="(m, i) in side.modifiers"
+                          :key="i"
+                          :class="m.pct >= 0 ? 'up' : 'down'"
+                        >
+                          {{ m.label }} {{ m.pct >= 0 ? "+" : ""
+                          }}{{ Math.round(m.pct) }}%
+                        </span>
+                      </div>
+                      <div v-if="side.destroyed" class="ab-destroyed">
+                        DESTRUÍDO
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Diálogo: escolher o esquadrão que recebe as tropas do inventário -->
+      <Transition name="fade">
+        <div
+          v-if="askSquadFor"
+          class="modal-scrim"
+          @click.self="askSquadFor = null"
+        >
+          <div class="modal">
+            <h3>Qual esquadrão?</h3>
+            <p class="modal-text">
+              Escolha o esquadrão que vai receber
+              {{ askSquadFor.length }} tropa(s):
+            </p>
+            <div class="pick-squads">
+              <button
+                v-for="s in playerSquadsHere"
+                :key="s.id"
+                class="pick-squad"
+                :disabled="busySquad"
+                @click="doSendTroops(askSquadFor ?? [], s.id)"
+              >
+                <span>⚔️ {{ squadName(s) }}</span>
+                <span class="dim">
+                  {{ s.troops.length }}/{{ maxTroops(s.commander.stars) }}
+                  tropas
+                </span>
+              </button>
+            </div>
+            <div class="modal-actions">
+              <button @click="askSquadFor = null">Cancelar</button>
             </div>
           </div>
         </div>
@@ -2285,7 +3278,7 @@ function provinceFill(p: Province): string {
 .squad-recruit {
   display: block;
   width: auto;
-  margin: 8px 13px 14px;
+  margin: 8px 13px 0;
   padding: 10px;
   font-size: 0.88rem;
   font-weight: 800;
@@ -2296,6 +3289,29 @@ function provinceFill(p: Province): string {
 .squad-recruit:hover:not(:disabled) {
   filter: brightness(1.12);
   color: #9ad187;
+}
+.squad-city {
+  display: block;
+  width: auto;
+  margin: 8px 13px 14px;
+  padding: 10px;
+  font-size: 0.88rem;
+  font-weight: 800;
+  background: linear-gradient(180deg, #3a4555 0%, #222a38 100%);
+  border-color: #5b9fd1;
+  color: #88bde0;
+}
+.squad-city:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: #88bde0;
+}
+.rc-note {
+  font-size: 0.78rem;
+  color: #9aa0ac;
+  line-height: 1.45;
+}
+.rc-note strong {
+  color: #cdd2da;
 }
 
 /* Botão de voltar do recrutamento */
@@ -2444,6 +3460,488 @@ function provinceFill(p: Province): string {
   flex: none;
   width: 30px;
   padding: 6px 0;
+}
+
+/* ===== Combate ===== */
+/* Texto "livre para ser tomado" no bloco de defensores */
+.bf-open {
+  color: #9ad187;
+}
+/* Botão de atacar na linha de um esquadrão inimigo */
+.sbtn.attack {
+  border-color: #cf6b4a;
+  color: #e6917a;
+}
+.sbtn.attack:hover:not(:disabled) {
+  border-color: #cf6b4a;
+  background: rgba(207, 107, 74, 0.2);
+  color: #f0a98f;
+}
+/* Modificadores de ambiente da batalha */
+.env-mods {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.env-mod {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 9px;
+  font-size: 0.78rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.env-mod.up {
+  background: rgba(70, 170, 90, 0.14);
+  color: #9ad187;
+}
+.env-mod.down {
+  background: rgba(207, 107, 74, 0.14);
+  color: #e6917a;
+}
+.env-mod span:last-child {
+  font-weight: 800;
+}
+.env-none {
+  margin: 0;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: #7d8694;
+}
+.env-total {
+  margin-top: 3px;
+  text-align: right;
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: var(--gold);
+}
+/* Botão de atacar a região */
+.attack-region {
+  border-color: #cf6b4a;
+  color: #e6917a;
+}
+.attack-region:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: #e6917a;
+}
+/* Botão de tomar território */
+.take-territory {
+  margin-top: 8px;
+  border-color: var(--gold);
+  color: var(--gold);
+}
+.take-territory:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: var(--gold);
+}
+/* Diálogo de tomar território */
+.take-options {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-bottom: 14px;
+}
+.take-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 13px;
+  text-align: left;
+  white-space: normal;
+}
+.take-opt.occupy:hover:not(:disabled) {
+  border-color: #7fb86b;
+}
+.take-opt.devastate:hover:not(:disabled) {
+  border-color: #cf6b4a;
+}
+.take-opt-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+}
+.take-opt-desc {
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: #9aa0ac;
+}
+
+/* ===== Modal de batalha ===== */
+.battle-modal {
+  width: 460px;
+}
+.dice-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin: 6px 0 14px;
+}
+.dice-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.dice-tag {
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.dice-tag.atk {
+  background: rgba(207, 107, 74, 0.2);
+  color: #e6917a;
+}
+.dice-tag.def {
+  background: rgba(91, 159, 209, 0.2);
+  color: #88bde0;
+}
+.dice-pair {
+  display: flex;
+  gap: 8px;
+}
+.die {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: #20160a;
+  background: linear-gradient(180deg, #f0e3c0 0%, #d8c79a 100%);
+  border: 1px solid #b8a878;
+  border-radius: 9px;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+}
+.die.rolling {
+  animation: die-shake 0.18s infinite;
+  color: #7a6a44;
+}
+@keyframes die-shake {
+  0% { transform: translateY(0) rotate(-8deg); }
+  50% { transform: translateY(-4px) rotate(8deg); }
+  100% { transform: translateY(0) rotate(-8deg); }
+}
+.dice-trad {
+  color: var(--gold);
+  font-weight: 700;
+}
+.dice-sum {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #9aa0ac;
+}
+.dice-vs {
+  font-size: 1.2rem;
+}
+.bt-rolling {
+  text-align: center;
+  color: var(--gold);
+  font-weight: 700;
+  margin: 14px 0;
+}
+.bt-sides {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.bt-side {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+.bt-side.destroyed {
+  border-color: #cf6b4a;
+}
+.bt-side-name {
+  font-weight: 800;
+  color: #fff;
+}
+.bt-force {
+  font-size: 0.84rem;
+  color: #cdd2da;
+  margin-top: 2px;
+}
+.bt-force strong {
+  color: var(--gold);
+  font-size: 1rem;
+}
+.bt-mods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 7px 0;
+}
+.bt-mod {
+  font-size: 0.66rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.bt-mod.up {
+  background: rgba(70, 170, 90, 0.18);
+  color: #9ad187;
+}
+.bt-mod.down {
+  background: rgba(207, 107, 74, 0.18);
+  color: #e6917a;
+}
+.bt-dmg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #cdd2da;
+}
+.bt-destroyed {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  color: #e6917a;
+}
+.bt-xp {
+  margin: 12px 0 0;
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.84rem;
+  color: #9ad187;
+}
+.bt-xp + .bt-final {
+  margin-top: 6px;
+}
+.bt-final {
+  margin: 12px 0 0;
+  text-align: center;
+  font-weight: 800;
+  color: var(--gold);
+}
+
+/* ===== Modal do exército ===== */
+.army-modal {
+  width: 560px;
+  max-width: 94vw;
+  display: flex;
+  flex-direction: column;
+  max-height: 84vh;
+  padding: 0;
+}
+.army-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 0;
+}
+.army-head h3 {
+  margin: 0;
+}
+.army-tabs {
+  display: flex;
+  gap: 7px;
+  padding: 12px 16px 0;
+}
+.army-tabs button {
+  flex: 1;
+}
+.army-body {
+  padding: 13px 16px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.army-empty {
+  color: #7d8694;
+  font-style: italic;
+  font-size: 0.84rem;
+  margin: 2px 0;
+}
+.army-empty.sub {
+  font-size: 0.76rem;
+  margin: 2px 0 0;
+}
+.army-squad {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+.army-squad-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.as-name {
+  font-weight: 800;
+  color: #fff;
+}
+.as-name-input {
+  font-family: inherit;
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: #fff;
+  background: #0e131d;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  width: 170px;
+}
+.as-name-input:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+.as-meta {
+  flex: 1;
+  font-size: 0.76rem;
+  color: #9aa0ac;
+}
+.army-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 7px;
+  padding: 6px 9px;
+  font-size: 0.78rem;
+  color: #cdd2da;
+  background: rgba(232, 184, 74, 0.1);
+  border-radius: 6px;
+}
+.ac-line.dim {
+  color: #9aa0ac;
+}
+.army-troop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.at-name {
+  font-weight: 700;
+  color: #fff;
+}
+.at-stat {
+  color: #cdd2da;
+}
+.at-acts {
+  margin-left: auto;
+  display: flex;
+  gap: 5px;
+}
+.mini-btn {
+  padding: 4px 9px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 6px;
+}
+.mini-btn.danger:hover:not(:disabled) {
+  border-color: #cf6b4a;
+  color: #e6917a;
+}
+.mini-btn.receive {
+  border-color: #7fb86b;
+  color: #9ad187;
+}
+.move-troop-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 9px 11px;
+  font-size: 0.8rem;
+  background: rgba(232, 184, 74, 0.12);
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+}
+.move-troop-banner span {
+  flex: 1;
+}
+.army-battle {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+.ab-head {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.86rem;
+}
+.ab-final {
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  color: var(--gold);
+  background: rgba(232, 184, 74, 0.16);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+.ab-dice {
+  font-size: 0.78rem;
+  color: #cdd2da;
+  margin: 4px 0 8px;
+}
+.ab-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ab-side {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+.ab-side.destroyed {
+  border-color: #cf6b4a;
+}
+.ab-side-name {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.82rem;
+}
+.ab-side-stat {
+  font-size: 0.74rem;
+  color: #aab2bf;
+  margin-top: 2px;
+}
+.ab-mods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.ab-mods span {
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.ab-mods .up {
+  background: rgba(70, 170, 90, 0.16);
+  color: #9ad187;
+}
+.ab-mods .down {
+  background: rgba(207, 107, 74, 0.16);
+  color: #e6917a;
+}
+.ab-destroyed {
+  margin-top: 5px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  color: #e6917a;
 }
 
 /* ===== Aviso do modo de movimento ===== */
@@ -2699,5 +4197,121 @@ tr.me {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* ===== Painel da cidade (Ver cidade) ===== */
+.city-panel {
+  position: absolute;
+  right: 14px;
+  top: 70px;
+  bottom: 156px;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+}
+.city-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 13px 0;
+}
+.city-tabs button {
+  flex: 1;
+}
+.city-body {
+  padding: 12px 13px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.ci-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 7px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: #8a92a0;
+}
+.ci-label:first-child {
+  margin-top: 0;
+}
+.ci-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ci-res {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #cdd2da;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+.ci-note {
+  margin: 7px 0 0;
+  font-size: 0.74rem;
+  font-style: italic;
+  color: #7d8694;
+}
+.ci-troop {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 6px;
+  padding: 7px 9px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.ci-troop.picked {
+  border-color: var(--gold);
+  background: rgba(232, 184, 74, 0.1);
+}
+.ci-troop input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--gold);
+  flex: none;
+}
+.ci-troop-icon {
+  font-size: 1.5rem;
+}
+.ci-troop-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.ci-troop-name {
+  font-weight: 700;
+  font-size: 0.84rem;
+  color: #fff;
+}
+.ci-troop-sub {
+  font-size: 0.72rem;
+  color: #9aa0ac;
+}
+.ci-move-btn {
+  margin: 12px 0 0;
+}
+
+/* Diálogo "Qual esquadrão?" */
+.pick-squads {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+.pick-squad {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  font-weight: 700;
 }
 </style>

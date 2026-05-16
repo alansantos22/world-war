@@ -17,13 +17,13 @@ nações — todas controladas por IA.
 
 Estado atual: o **mapa-múndi** com províncias, nações e direcionamentos
 políticos; cada facção tem os seus **valores**, cada território a sua
-**produção por turno**, a sua **força de batalha** e os seus dados de
+**produção por turno**, os seus **defensores** e os seus dados de
 **clima e geografia** (hemisfério, zona de clima, zonas sísmicas, vulcões);
 o jogo já avança por **turnos** (1 semana cada), em que as facções recebem a
 produção das suas províncias e pagam a manutenção dos seus exércitos; o
-jogador já monta, move e dissolve **esquadrões** militares no mapa e **recruta
-tropas** para eles. A **resolução de combate** (atacar territórios e
-esquadrões), a IA, os eventos e a diplomacia ainda serão implementados.
+jogador monta, move e dissolve **esquadrões** militares, **recruta tropas**,
+**ataca** territórios e esquadrões inimigos e **toma** territórios neutros. A
+IA, os eventos e a diplomacia ainda serão implementados.
 
 ---
 
@@ -291,7 +291,7 @@ Cada província pertence a uma partida (`save_id`).
 | `climate`       | TEXT    | Zona de clima (`ClimateZone`).          |
 | `seismic`       | INTEGER | 1 se a província fica numa zona sísmica.|
 | `volcano`       | INTEGER | 1 se há um vulcão na província.         |
-| `battle_force`  | INTEGER | Força de batalha a derrubar para tomar o território. |
+| `defender_hp`   | INTEGER | Vida somada das tropas que defendem o território neutro. |
 | `conquered`     | INTEGER | 1 se o território foi tomado de outra facção. |
 
 ### Tabela `factions`
@@ -322,12 +322,16 @@ Uma linha por **esquadrão** no mapa de uma partida (ver seção 11).
 | `x`, `y`           | INTEGER | Posição (célula) do esquadrão no mapa.          |
 | `created_turn`     | INTEGER | Turno em que foi montado (pronto no seguinte).  |
 | `last_moved_turn`  | INTEGER | Último turno em que se moveu.                   |
-| `cmd_stars`        | INTEGER | Estrelas do comandante (1–5).                   |
+| `name`             | TEXT    | Nome dado pelo jogador (`NULL` = "Esquadrão #id"). |
+| `cmd_stars`        | INTEGER | Estrelas do comandante — o talento inato (1–5). |
 | `cmd_force`        | INTEGER | Força contribuída pelo comandante.              |
 | `cmd_hp`           | INTEGER | Pontos de vida atuais do comandante.            |
 | `cmd_max_hp`       | INTEGER | Pontos de vida máximos do comandante.           |
 | `cmd_defense`      | INTEGER | Defesa do comandante.                           |
-| `cmd_xp`           | INTEGER | Experiência acumulada do comandante.            |
+| `cmd_xp`           | INTEGER | Experiência de batalha do comandante (define o level). |
+| `cmd_tradition`    | INTEGER | Tradição militar do comandante.                 |
+| `attacks_used`     | INTEGER | Ataques já gastos no turno atual (zera a cada turno). |
+| `moral`            | INTEGER | Moral do esquadrão (0–100).                     |
 
 ### Tabela `squad_troops`
 
@@ -341,6 +345,7 @@ Uma linha por **tropa** dentro de um esquadrão (ver seção 11).
 | `force`    | INTEGER | Força que a tropa soma ao esquadrão.            |
 | `hp`       | INTEGER | Pontos de vida atuais.                          |
 | `max_hp`   | INTEGER | Pontos de vida máximos.                         |
+| `xp`       | INTEGER | Experiência de batalha da tropa (define o level). |
 
 ### Tabela `recruit_orders`
 
@@ -352,10 +357,38 @@ Uma linha por **tropa na fila de produção** de uma cidade (ver seção 11).
 | `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
 | `x`, `y`     | INTEGER | Tile da cidade que produz a tropa.              |
 | `owner_code` | TEXT    | Facção dona.                                    |
-| `squad_id`   | INTEGER | Esquadrão que receberá a tropa pronta.          |
+| `squad_id`   | INTEGER | Coluna legada (a tropa pronta vai para o inventário da cidade). |
 | `kind`       | TEXT    | Tipo da tropa.                                  |
 | `prod_cost`  | INTEGER | Produção necessária para concluir a tropa.      |
 | `prod_done`  | INTEGER | Produção já acumulada.                          |
+
+### Tabela `battle_logs`
+
+Uma linha por **batalha** travada na partida — guarda só as **200 mais
+recentes** (ver seção 11).
+
+| Coluna    | Tipo    | Descrição                                          |
+|-----------|---------|----------------------------------------------------|
+| `id`      | INTEGER | Chave primária.                                    |
+| `save_id` | INTEGER | Partida (`saves.id`) a que pertence.               |
+| `turn`    | INTEGER | Turno em que a batalha ocorreu.                    |
+| `data`    | TEXT    | Relatório completo da batalha, em JSON.            |
+
+### Tabela `city_troops`
+
+Uma linha por **tropa no inventário de uma cidade** — recrutada, mas ainda
+fora de um esquadrão (ver seção 11).
+
+| Coluna       | Tipo    | Descrição                                       |
+|--------------|---------|-------------------------------------------------|
+| `id`         | INTEGER | Chave primária.                                 |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
+| `x`, `y`     | INTEGER | Tile da cidade onde a tropa está guardada.      |
+| `owner_code` | TEXT    | Facção dona.                                    |
+| `kind`       | TEXT    | Tipo da tropa.                                  |
+| `hp`         | INTEGER | Pontos de vida atuais.                          |
+| `max_hp`     | INTEGER | Pontos de vida máximos.                         |
+| `xp`         | INTEGER | Experiência de batalha da tropa.                |
 
 Criar um novo jogo gera o mapa, grava as províncias e cria as facções daquela
 partida; carregar uma partida lê províncias e facções do seu `save_id`. "Novo
@@ -382,10 +415,10 @@ deixando o mapa livre.
   cursor e o nome da partida. Não traz o nome do jogo (já aparece no menu
   inicial).
 - **Barra lateral** (canto superior esquerdo) — uma lista vertical de botões
-  arredondados, **só com ícones**, para as ações do jogo: **Nações** (🏴) e
-  **Direcionamentos** (🎖️), que abrem os painéis, e **Novo mapa** (↻),
-  **Salvar jogo** (💾), **Menu** (⏏) e **Tela cheia** (⛶). O texto de cada
-  ação aparece como dica ao passar o mouse.
+  arredondados, **só com ícones**, para as ações do jogo: **Nações** (🏴),
+  **Direcionamentos** (🎖️) e **Exército** (🪖), que abrem os seus painéis, e
+  **Novo mapa** (↻), **Salvar jogo** (💾), **Menu** (⏏) e **Tela cheia** (⛶).
+  O texto de cada ação aparece como dica ao passar o mouse.
 - **Painel da província** — aparece ao **clicar numa província**; mostra dono,
   direcionamento, recurso, **clima** (zona, hemisfério, estação, avisos de
   zona sísmica/vulcão) e a **produção por turno** (manpower, recurso local,
@@ -393,6 +426,9 @@ deixando o mapa livre.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
   territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
   fica aberto por vez; o botão acende quando ativo.
+- **Painel da cidade** (direita) — aberto pelo botão **Ver cidade** do painel
+  da província; mostra a cidade em abas (estilo *Civilization*) — hoje a aba
+  **Inventário** (ver seção 11).
 - **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
   **turno atual**, a **data** e a **estação** de cada hemisfério (ver seção
   10), e traz o botão grande **Próximo turno** que avança o tempo (ver seção
@@ -431,13 +467,18 @@ Cada facção recebe a produção das suas províncias somada aos seus valores:
 As **capitais já produzem o dobro** (regra da geração do mapa — seção 2),
 então esse bônus entra naturalmente na soma.
 
-Cada facção também **paga a manutenção** dos seus esquadrões (ver seção 11):
-**dinheiro** -= 25 por esquadrão **+ 10 por tropa**. O dinheiro nunca fica
-negativo — se o caixa não cobre a manutenção, ele só chega a 0.
+Cada facção também **paga a manutenção** do seu exército em **dinheiro** (ver
+seção 11): 25 por esquadrão + 10 por tropa, e ainda as tropas do inventário —
+mas tudo que está **num tile da própria facção custa metade**. O dinheiro
+nunca fica negativo: se o caixa não cobre a manutenção, ele só chega a 0.
 
-Por fim, a **fila de recrutamento** de cada cidade avança: a **produção** da
-província é gasta na primeira tropa da fila e, quando concluída, a tropa entra
-no esquadrão alvo (ver seção 11).
+A **fila de recrutamento** de cada cidade avança: a **produção** da província
+é gasta na primeira tropa da fila e, quando concluída, a tropa entra no
+**inventário da cidade** (ver seção 11).
+
+Por fim, cada esquadrão parado em **território da própria facção** recupera
+**5 de vida** (comandante e cada tropa), e **todos os esquadrões recuperam os
+seus 2 ataques** do turno (ver seção 11).
 
 A **influência** ainda **não muda** por turno e o **dinheiro** ainda não tem
 uma fonte de *produção* (só a despesa da manutenção). Definir de onde vêm é um
@@ -515,32 +556,37 @@ vulcões com o ícone 🌋; o painel da província mostra os dois como avisos.
 
 ---
 
-## 11. Esquadrões e força de batalha
+## 11. Esquadrões, recrutamento e batalha
 
-O sistema militar do jogo. Definido em
-[`src/game/squads.ts`](src/game/squads.ts), com a força de batalha dos
-territórios em [`src/game/map-generator.ts`](src/game/map-generator.ts).
+O sistema militar do jogo: os esquadrões e o recrutamento estão em
+[`src/game/squads.ts`](src/game/squads.ts), a resolução de combate em
+[`src/game/battle.ts`](src/game/battle.ts) e os defensores dos territórios são
+sorteados em [`src/game/map-generator.ts`](src/game/map-generator.ts).
 
-> A **resolução de combate** em si — atacar territórios e esquadrões, derrubar
-> a força de batalha — ainda **não está implementada**; é o próximo passo. O
-> que existe hoje é toda a **estrutura**: a força de batalha como dado, os
-> esquadrões (montar, mover, dissolver, manutenção) e o **recrutamento de
-> tropas**.
+> **Planejado:** bônus de defesa do tile e buffs/debuffs de **construções**
+> (todos os tiles poderão ter construções no futuro); tomar territórios de
+> **outras facções** (hoje só territórios neutros são tomados); contra-ataque
+> do defensor; e a progressão de **XP → estrelas** do comandante.
 
-### Força de batalha do território
+### Defensores do território
 
-Toda província de terra tem uma **força de batalha** (`battleForce`), sorteada
-na geração do mapa (20–80; as **capitais resistem o dobro**). Para tomar um
-território de forma **hostil** é preciso derrubar essa força a **0**.
+Todo **território neutro** é defendido por **tropas de infantaria** — de 2 a
+12, sorteadas na geração do mapa. Para não materializar centenas de tropas, a
+defesa de um território é um **único número**: a sua **vida somada**
+(`defenderHp`), com cada tropa valendo 50 de vida — `defenderHp / 50`
+(arredondado para cima) é o número de tropas vivas. Territórios já possuídos
+(as capitais iniciais) não têm defensores.
 
-- Um **território neutro** tomado torna-se **seu**.
-- Um território **tomado de outra facção** funciona de forma diferente — por
-  enquanto só fica **marcado** com a flag `conquered`.
-- Ao tomar um território o jogador decidirá entre **devastá-lo** (destruir
-  tudo e matar todos que estão nele) ou apenas **ocupá-lo**.
+Para tomar um território é preciso atacá-lo até derrubar essa vida a **0**
+(ver *Batalha*). Com os defensores eliminados, o jogador escolhe:
 
-A força de batalha aparece no painel da província. *A tomada em si e a escolha
-de devastar dependem da resolução de combate — **planejado**.*
+- **Ocupar** — o território passa a ser seu, com a produção intacta.
+- **Devastar** — o território é seu, mas toda a sua **produção por turno**
+  (manpower, recurso, produção, pesquisa e cultura) é **zerada**.
+
+Um **território neutro** tomado torna-se seu. Tomar territórios de **outras
+facções** funciona de forma diferente e ainda não está implementado — a flag
+`conquered` está reservada para marcá-los.
 
 ### Esquadrões
 
@@ -557,52 +603,85 @@ seguinte** ("Em preparação" até lá).
 
 | Atributo  | Inicial | Observação                                              |
 |-----------|---------|---------------------------------------------------------|
-| Estrelas  | 1       | Buff de força (1★ = +0%, **+5% por estrela**, 5★ = +20%) e limite de tropas. |
+| Estrelas  | 1       | O **talento** inato (1–5): +5% de força por estrela e o limite de tropas. Não muda com a experiência. |
+| Level     | 0       | A **experiência** de batalha (0–5) — ver *Experiência e level*. |
+| Tradição  | 0       | **Tradição militar** — somada à soma dos dados na batalha. *Como subir: planejado.* |
 | Força     | 30      | Contribui para a força do esquadrão (cada tropa soma ~⅓ disso). |
 | Vida      | 100     | Pontos de vida.                                         |
 | Defesa    | 1       | Defesa do comandante.                                   |
-| XP        | 0       | O comandante acumula experiência. *Progressão de XP → estrelas: planejada.* |
 
 O comandante é o **último a morrer** do esquadrão — só morre quando nenhuma
 outra tropa tiver vida. Se o **comandante morre, o esquadrão inteiro morre**.
 
+**Talento × experiência** — as **estrelas** são o talento com que o comandante
+nasce (um general pode lutar dezenas de batalhas e ainda assim não ser
+Alexandre, o Grande); o **level** é a experiência ganha lutando. São coisas
+separadas.
+
 **Tropas e limite** — além do comandante, o esquadrão tem **tropas** (ver
-*Recrutamento*), que somam força e têm pontos de vida próprios. Um comandante
-de **1★ comporta 20 tropas** e **cada estrela a mais soma +2** (5★ = 28); o
+*Recrutamento*), que somam força e têm vida e level próprios. Um comandante de
+**1★ comporta 20 tropas** e **cada estrela a mais soma +2** (5★ = 28); o
 comandante não conta nesse limite.
 
 A **força do esquadrão** é a soma da força do comandante com a das suas tropas,
-multiplicada pelo bônus de estrelas.
+multiplicada pelo bônus de **talento** (estrelas) e pelo de **experiência**
+(level médio — ver *Experiência e level*).
+
+**Nome** — o jogador pode **renomear** cada esquadrão no painel do exército;
+sem nome, ele aparece como "Esquadrão #id".
 
 **Mover** — o painel do tile lista os esquadrões; em cada esquadrão seu há o
 botão **Mover**. Ao clicar nele, os tiles vizinhos válidos ficam destacados e
 o próximo clique leva o esquadrão para lá. Um esquadrão **move-se 1 tile por
-turno** — mas **sair de um tile gelado leva 2 turnos**.
+turno** — mas **sair de um tile gelado leva 2 turnos**. Cada movimento custa
+**2% de moral**. Não se pode **entrar em território de outra facção** nem em
+tiles ocupados por **esquadrões de outras facções** — só território seu ou
+neutro (até existir um sistema de diplomacia).
+
+**Moral** — todo esquadrão tem uma **moral** (0–100%, começa em 100%). Ela
+afeta a força em batalha: 50% é neutro, e a cada 10% acima/abaixo de 50% são
+±3% de força. A moral muda assim:
+
+- **−5%** a cada batalha; **−15%** a mais se o esquadrão perder uma tropa;
+  **+15%** se destruir todo o exército inimigo;
+- **−2%** a cada movimento;
+- **+5%** por turno parado (sem lutar nem mover) — o **dobro** num tile da
+  própria facção.
 
 **Dissolver** — o mesmo painel traz o botão **Excluir** para dissolver um
-esquadrão seu (o que estava na sua fila de recrutamento é reembolsado).
+esquadrão seu. **Não há reembolso**: esquadrão perdido — dissolvido ou
+destruído em batalha — é perdido de vez, como na vida real.
 
 **Manutenção** — descontada de cada facção no avanço de turno (seção 9):
-**25 de dinheiro** por esquadrão (o comandante) **+ 10 por tropa**.
+**25 de dinheiro** por esquadrão (o comandante) **+ 10 por tropa**. Quem está
+**num tile da própria facção custa metade** — tropas em repouso saem mais
+barato que tropas em campanha. As tropas guardadas no **inventário** de uma
+cidade também pagam manutenção, e sempre pela metade (**5** cada).
+
+> *Provisório:* hoje a metade vale para **qualquer tile da facção**, porque o
+> jogo ainda não distingue **cidade** de território. Quando existir o sistema
+> de **cidades** (cidade + zona ao redor, estilo *Civilization*), o desconto
+> passará a valer só nas cidades.
 
 **Lista no tile** — o painel da província **sempre mostra a lista de
-esquadrões** daquele tile. Cada linha traz a força, o número de tropas, a vida
-e a defesa do comandante, a manutenção e o estado (Pronto / Em preparação).
+esquadrões** daquele tile. Cada linha traz a força, as tropas, a vida e a
+defesa, a moral, os ataques restantes e o estado (Pronto / Em preparação).
 
-**Atacar** — esquadrões servem para tomar territórios de forma hostil e para
-combater outros esquadrões no mesmo tile (botão **Atacar**). *A resolução
-desses ataques é o* **sistema de batalha — planejado**; por isso os botões
-**Atacar** e **Tomar território** aparecem **desativados** por enquanto.
+**Painel do exército** — o botão 🪖 da barra lateral abre um modal com **todos
+os esquadrões** da facção e as suas tropas. Ali dá para **excluir** uma tropa e
+**transferir tropas** entre esquadrões que estejam no **mesmo tile**. O modal
+ainda tem a aba **Batalhas**, com o histórico de combates (ver *Batalha*).
+
+**Atacar** — cada esquadrão tem **2 ataques por turno** (recuperados no avanço
+de turno). Quando um esquadrão entra num tile que **não é da sua facção**, o
+painel do território abre o **Combate** — atacar a **região** (defensores de um
+tile neutro) ou um **esquadrão inimigo** do mesmo tile. Ver *Batalha*.
 
 ### Recrutamento de tropas
 
-As tropas entram no esquadrão pelo **recrutamento**. No painel de uma
-**cidade sua** que tenha um **esquadrão seu** no tile, o botão **Recrutamento**
-**substitui** as informações do território pelo painel de recrutamento (com um
-botão **‹** para voltar).
-
-Ali o jogador escolhe o **esquadrão alvo** (entre os seus naquele tile) e a
-**tropa**. Hoje só há **infantaria**:
+As tropas nascem pelo **recrutamento**. No painel de uma **cidade sua**, o
+botão **Recrutamento** substitui as informações do território pelo painel de
+recrutamento (com um botão **‹** para voltar). Hoje só há **infantaria**:
 
 | Tropa      | Força | Vida | Dinheiro | Manpower | Produção | Manutenção |
 |------------|-------|------|----------|----------|----------|------------|
@@ -614,18 +693,136 @@ infantaria = 50).
 O **dinheiro** e o **manpower** são cobrados **na hora** de enfileirar. A
 **produção** é o tempo de construção: a cada turno a cidade gasta a sua
 **produção por turno** (seção 2) na **primeira** tropa da sua **fila** — quando
-a produção acumulada alcança o custo, a tropa fica pronta e **entra no
-esquadrão alvo**. Ex.: uma cidade que produz 38/turno leva
+a produção acumulada alcança o custo, a tropa fica pronta e entra no
+**inventário da cidade**. Ex.: uma cidade que produz 38/turno leva
 `ceil(50 / 38) = 2` turnos.
 
-**Fila de produção** — dá para **enfileirar** várias tropas (desde que haja
+**Fila de produção** — dá para **enfileirar** várias tropas (basta ter
 dinheiro e manpower); a cada turno só a **primeira** da fila avança. Uma ordem
-pode ser **cancelada** (devolve o dinheiro e o manpower). Não se pode
-enfileirar além do limite de tropas do esquadrão (tropas já no esquadrão + as
-da fila).
+pode ser **cancelada** (devolve o dinheiro e o manpower).
 
-> **Planejado:** outras tropas além da infantaria e a progressão de XP do
-> comandante.
+### Inventário da cidade
+
+A tropa pronta **não** vai direto para um esquadrão — fica guardada no
+**inventário da cidade**. Assim dá para **treinar tropas em várias cidades** e
+só depois juntá-las a um esquadrão.
+
+O botão **Ver cidade** (no painel da província) abre um **painel da cidade** à
+direita, com abas no topo (estilo *Civilization*). Hoje existe a aba
+**Inventário**: mostra os **recursos** da cidade (zerados — o estoque chega com
+o sistema de produção) e as **tropas** guardadas.
+
+Cada tropa do inventário tem um botão **Add ao esquadrão** e uma **caixa de
+seleção** para mover várias de uma vez. Ao enviar tropas a um esquadrão:
+
+- com **1 esquadrão** estacionado na cidade, elas vão direto para ele;
+- com **vários**, abre o diálogo **Qual esquadrão?**;
+- sem **nenhum**, a ação fica desabilitada.
+
+O esquadrão de destino precisa ter espaço (limite de tropas pelas estrelas).
+
+> **Planejado:** as tropas do inventário também **defenderão a cidade** quando
+> ela for atacada (hoje o inventário é só armazenamento — quem defende um tile
+> são os esquadrões estacionados nele); outras tropas além da infantaria; e a
+> **construção e produção** da cidade no painel **Ver cidade** (estilo
+> *Civilization*).
+
+### Batalha
+
+Quando um esquadrão entra num tile que **não é da sua facção**, o painel abre o
+**Combate**: escolhe-se o **esquadrão atacante** e o alvo — a **região** (os
+defensores de um tile neutro) ou um **esquadrão inimigo** do mesmo tile. Cada
+ataque gasta 1 dos 2 ataques do esquadrão e resolve **uma batalha**.
+
+> Hoje, na prática, só há batalha contra **territórios neutros**: a regra de
+> movimento impede entrar em tiles de outras facções ou ocupados por
+> esquadrões delas, então o combate **esquadrão × esquadrão** só será
+> alcançável com o sistema de diplomacia/guerra. O código já o resolve.
+
+A batalha é **bidirecional**: atacante e defensor trocam dano de uma só vez —
+quem ataca também é ferido.
+
+**Força efetiva** — a força-base de cada lado (comandante + tropas, já com os
+bônus de **talento** e **experiência**; para um território neutro, nº de tropas
+× 10) é ajustada por fatores que se **somam**:
+
+- **Ambiente** — vale para os **dois lados**, cada um com a sua capital: +5%
+  perto da própria capital; terreno gelado −20%, desértico/tropical −10%;
+  inverno em terreno gelado −30%; verão em terreno desértico −20%.
+- **Dados** — 2 dados por lado (estilo EU4). A **tradição militar** do
+  comandante é somada à soma dos seus dados. Compara-se a soma: quem somar mais
+  leva **+10% por ponto de diferença**; no **empate**, o defensor leva +10% de
+  vantagem.
+- **Moral** — 50% é neutro; ±3% de força a cada 10% de moral. (Os defensores de
+  um território neutro não têm moral.)
+
+```
+força efetiva = força-base × (1 + ambiente + dados + moral)
+```
+
+**Dano** — cada lado tira vida do outro:
+
+```
+dano = força efetiva do atacante − defesa do alvo   (e vice-versa)
+```
+
+A defesa é a do comandante (1) — territórios neutros têm defesa 0. O dano cai
+primeiro nas **tropas** (que somem quando a vida chega a 0) e por último no
+**comandante**; se ele morre, o esquadrão é destruído. Num território, o dano
+baixa a vida dos defensores — zerá-la o libera para ser tomado.
+
+**Os dados** são lançados na hora: o modal de batalha mostra os 2 dados de cada
+lado girando e revela o resultado — força base e efetiva, todos os
+modificadores, o **dano dado e sofrido** pelos dois lados, a vida antes/depois
+e as tropas perdidas.
+
+**Histórico** — toda batalha é registrada e pode ser revista na aba
+**Batalhas** do painel do exército, com os dados, os modificadores, o dano e as
+baixas de cada lado — para ajudar o jogador a estudar o campo de batalha. O
+histórico guarda as **200 batalhas mais recentes**.
+
+**Recuperação de vida** — um esquadrão parado num **território da própria
+facção** recupera **5 de vida** por turno (comandante e tropas, até o máximo).
+Fora do seu território, não há recuperação.
+
+### Experiência e level
+
+O **comandante** e **cada tropa** acumulam **experiência (XP)** própria e
+sobem de **level** (0 a 5) — XP e level são separados entre comandante e
+tropas, de modo que uma tropa recém-recrutada começa do zero mesmo num
+esquadrão veterano.
+
+**XP por batalha** — o comandante e as tropas sobreviventes ganham:
+
+```
+xp = 5 + dificuldade + bônus de território
+dificuldade  = (dano dado − dano sofrido) / 100, arredondado p/ baixo, de 0 a 4
+bônus        = +10 se a batalha derrotou todos os defensores do território
+```
+
+Numa batalha **esquadrão × esquadrão**, **os dois lados** ganham XP (cada um
+com a sua dificuldade). Numa batalha **esquadrão × território neutro**, só o
+esquadrão atacante ganha — e o bônus de território só vale para ele.
+
+O ganho ainda passa por um **multiplicador de XP** (hoje 1) — o gancho para
+futuras **pesquisas** que turbinem o ganho de experiência.
+
+**Curva de level** — uma progressão geométrica de XP por level:
+
+| Level | XP para o próximo |
+|-------|-------------------|
+| 0 → 1 | 20                |
+| 1 → 2 | 45                |
+| 2 → 3 | 100               |
+| 3 → 4 | 224               |
+| 4 → 5 | 500               |
+
+**Efeito do level** — cada level médio do esquadrão adiciona **+10% de força**.
+O level médio é a média dos levels de todos, mas o **comandante pesa como 3
+tropas**: um comandante experiente puxa tropas fracas para cima, e um
+inexperiente arrasta tropas fortes para baixo — como na vida real, em que bons
+generais salvam tropas fracas e maus generais desperdiçam tropas veteranas. Um
+esquadrão todo no level 5 é uma força de elite.
 
 ---
 
@@ -650,7 +847,8 @@ apps/desktop/src/
     ├── turns.ts          calendário dos turnos (data a partir do turno)
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
-    ├── squads.ts         esquadrões, tropas e fila de recrutamento
+    ├── squads.ts         esquadrões, tropas, recrutamento e inventário
+    ├── battle.ts         resolução de combate (dano, debuffs de ambiente)
     ├── map-generator.ts  geração procedural do mapa
     ├── world.ts          esquema SQLite, persistência e avanço de turno
     └── saves.ts          gestão das partidas salvas
@@ -670,11 +868,17 @@ apps/desktop/src/
    e "produção industrial" (efeito dos recursos, construção de tropas/edifícios).
 4. **Eventos** — terremotos, erupções e eventos sazonais sobre o mapa de clima
    e placas tectônicas (seção 10), com **buffs e debuffs**.
-5. **Esquadrões** — *parcial*: já é possível **montar, mover e dissolver**
-   esquadrões, **recrutar tropas** (infantaria) e cada território tem a sua
-   **força de batalha** (seção 11).
-6. **Sistema de batalha** — resolução de combate: atacar territórios (derrubar
-   a força de batalha a 0) e esquadrões, dano às tropas e ao comandante,
-   tomada do território e a escolha de **devastar ou ocupar**.
-7. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
-8. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).
+5. ~~**Esquadrões e batalha**~~ **Implementado** (seção 11): montar, mover e
+   dissolver esquadrões, **recrutar tropas**, **atacar** territórios e
+   esquadrões e **tomar** territórios neutros (ocupar ou devastar).
+6. **Construções** — edifícios nos tiles, com bônus de defesa e buffs/debuffs
+   que entram na conta da batalha (seção 11).
+7. **Conquista e defesa entre facções** — tomar territórios de outras nações;
+   o contra-ataque do defensor; e a **defesa das cidades** — hoje as tropas no
+   **inventário** ainda *não* defendem o tile (só os esquadrões estacionados),
+   e isso vai mudar (ver seção 11).
+8. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno;
+   só então uma cidade do jogador chega a ser atacada.
+9. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
+   destrava mover-se por território de outras facções e o combate entre
+   esquadrões (hoje só se batalha contra territórios neutros).
