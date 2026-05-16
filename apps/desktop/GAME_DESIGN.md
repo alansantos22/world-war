@@ -16,9 +16,10 @@ expandir território, gerir economia, fazer diplomacia e vencer as outras
 nações — todas controladas por IA.
 
 Estado atual: o **mapa-múndi** com províncias, nações e direcionamentos
-políticos; cada facção tem os seus **quatro valores** e cada território a sua
-**produção por turno** (ainda estáticos). Turnos, economia dinâmica, IA e
-diplomacia ainda serão implementados.
+políticos; cada facção tem os seus **quatro valores**, cada território a sua
+**produção por turno**, e o jogo já avança por **turnos** (1 semana cada),
+em que as facções recebem a produção das suas províncias. IA e diplomacia
+ainda serão implementadas.
 
 ---
 
@@ -95,8 +96,10 @@ geração do mapa):
 As **capitais produzem o dobro** de cada valor. Os números são sorteados a
 cada "Novo mapa" e ficam visíveis no painel da província.
 
-> **Planejado:** a cada turno, somar a produção das províncias de uma nação
-> aos valores da facção (ver seção 3). Hoje a produção é apenas estática.
+A cada turno (ver seção 9), o **manpower** e a **pesquisa** produzidos são
+somados aos valores da facção dona. "Recurso local" e "produção industrial"
+ainda **não são acumulados** — ficam reservados para mecânicas futuras
+(efeito dos recursos, construção de tropas/edifícios).
 
 ---
 
@@ -141,10 +144,11 @@ persistidos na tabela `factions`:
 Toda facção começa a partida com os **mesmos valores iniciais**
 (`STARTING_FACTION`): 1.000 de dinheiro, 100 de influência, 10.000 de
 manpower e 0 de pesquisa. Os valores da facção do jogador ficam visíveis na
-**barra da facção** da HUD (ver seção 8).
+**barra superior** da HUD (ver seção 8).
 
-> **Planejado:** os valores evoluem a cada turno a partir da produção das
-> províncias da nação (ver seção 2). Hoje são estoques estáticos.
+A cada turno a facção recebe a produção das suas províncias (ver seção 9):
+**manpower** e **pesquisa** crescem. Dinheiro e influência ainda **não têm
+fonte de produção** — ficam parados até definirmos de onde vêm.
 
 ### Bandeiras
 
@@ -215,9 +219,9 @@ Dentro do jogo, a nação do jogador aparece na barra superior (bandeira +
 nome), tem a sua capital destacada no mapa com um anel branco e é marcada com
 a etiqueta **VOCÊ** no ranking e no painel da província.
 
-A barra superior também tem o botão **Salvar jogo** (renomeia a partida e
-confirma o estado atual como salvo) e o botão **Menu** (volta ao menu
-inicial). A partida atual aparece marcada com 📌 na barra.
+A barra lateral tem o botão **Salvar jogo** (renomeia a partida e confirma o
+estado atual como salvo) e o botão **Menu** (volta ao menu inicial). A
+partida atual aparece marcada com 📌 na barra superior.
 
 ---
 
@@ -250,6 +254,7 @@ Uma linha por **partida salva**, incluindo a nação do jogador.
 | `name`             | TEXT    | Nome da partida.                                     |
 | `created_at`       | TEXT    | Data/hora de criação (ISO).                          |
 | `updated_at`       | TEXT    | Data/hora da última gravação (ISO).                  |
+| `turn`             | INTEGER | Turno atual da partida (começa em 1).                |
 | `player_code`      | TEXT    | Código da nação do jogador (`PLR` se personalizada). |
 | `custom_name`      | TEXT    | Nome da nação personalizada (`NULL` se nação fixa).  |
 | `custom_color`     | TEXT    | Cor da nação personalizada.                          |
@@ -324,6 +329,9 @@ deixando o mapa livre.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
   territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
   fica aberto por vez; o botão acende quando ativo.
+- **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
+  **turno atual** e a **data**, e traz o botão grande **Próximo turno** que
+  avança o tempo (ver seção 9).
 
 - **Navegação do mapa** — a roda do mouse dá **zoom** (centrado no cursor) e
   **arrastar** move o mapa. Não há botões de zoom: a navegação é toda pelo
@@ -336,7 +344,37 @@ deixando o mapa livre.
 
 Regra de ouro: nenhum painel fica na frente do mapa sem o jogador ter pedido.
 
-## 9. Estrutura do código
+## 9. Turnos
+
+O jogo avança por **turnos**, geridos em
+[`src/game/turns.ts`](src/game/turns.ts) (calendário) e
+[`src/game/world.ts`](src/game/world.ts) (`advanceTurn`).
+
+- A partida começa no **turno 1**, em **01 de Janeiro de 1980**.
+- Cada turno equivale a **1 semana** — a data avança 7 dias por turno.
+- O botão grande **Próximo turno** (caixa de turno, canto inferior direito)
+  avança um turno.
+
+### O que acontece a cada turno
+
+Cada facção recebe a produção das suas províncias somada aos seus valores:
+
+- **Manpower** += soma do manpower produzido pelas suas províncias.
+- **Pesquisa** += soma da pesquisa produzida pelas suas províncias.
+
+As **capitais já produzem o dobro** (regra da geração do mapa — seção 2),
+então esse bônus entra naturalmente na soma.
+
+**Dinheiro** e **influência** ainda **não mudam** por turno: o território não
+produz esses valores. Definir a fonte deles é um passo futuro.
+
+O turno fica gravado na coluna `turn` da tabela `saves` e os valores das
+facções na tabela `factions`; avançar o turno também marca a partida como
+modificada (`updated_at`).
+
+---
+
+## 10. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -353,24 +391,26 @@ apps/desktop/src/
     ├── flags.ts          geração do padrão das bandeiras
     ├── resources.ts      catálogo de recursos
     ├── economy.ts        valores da facção e produção do território
+    ├── turns.ts          calendário dos turnos (data a partir do turno)
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
     ├── map-generator.ts  geração procedural do mapa
-    ├── world.ts          esquema SQLite e persistência de mapa e facções
+    ├── world.ts          esquema SQLite, persistência e avanço de turno
     └── saves.ts          gestão das partidas salvas
 ```
 
 ---
 
-## 10. Roteiro (próximos passos)
+## 11. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
-2. **Turnos** — botão "Próximo turno" que avança o tempo.
-3. **Economia** — *parcial*: os valores da facção (dinheiro, influência,
-   manpower, pesquisa) e a produção por turno de cada território já existem
-   (seções 2 e 3), mas ainda são **estáticos**. Falta o turno somar a produção
-   das províncias aos valores da facção.
+2. ~~**Turnos** — botão "Próximo turno" que avança o tempo.~~
+   **Implementado** (seção 9): turnos semanais a partir de 01/01/1980.
+3. **Economia** — *parcial*: a cada turno as facções já recebem **manpower** e
+   **pesquisa** das suas províncias (seção 9). Falta dar uma fonte de produção
+   ao **dinheiro** e à **influência**, e usar "recurso local" e "produção
+   industrial" (efeito dos recursos, construção de tropas/edifícios).
 4. **Expansão** — conquistar províncias neutras e vizinhas.
 5. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
 6. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).

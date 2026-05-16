@@ -7,9 +7,11 @@ import { NATIONS, type Nation, flagSeed } from "../game/nations";
 import { ALIGNMENTS, ALIGNMENT_LIST } from "../game/alignments";
 import { resourceInfo } from "../game/resources";
 import { FACTION_STATS, TERRITORY_STATS, type FactionState } from "../game/economy";
+import { formatTurnDate } from "../game/turns";
 import {
   loadMap,
   loadFactions,
+  advanceTurn,
   regenerateMap,
   getSave,
   type Province,
@@ -29,6 +31,8 @@ const game = ref<GameSave | null>(null);
 const saveName = ref("");
 const provinces = ref<Province[]>([]);
 const factions = ref<FactionState[]>([]);
+const turn = ref(1);
+const advancing = ref(false);
 const loading = ref(true);
 const err = ref("");
 const busy = ref(false);
@@ -66,6 +70,9 @@ const playerFaction = computed<FactionState | null>(
 function fmt(n: number): string {
   return n.toLocaleString("pt-BR");
 }
+
+/** Data do turno atual (turno 1 = 01/01/1980; +1 semana por turno). */
+const currentDate = computed(() => formatTurnDate(turn.value));
 
 // ===== Zoom e navegação do mapa =====
 const MIN_SCALE = 1;
@@ -186,6 +193,7 @@ async function load() {
     const save = await getSave(props.saveId);
     game.value = save;
     saveName.value = save.name;
+    turn.value = save.turn;
     provinces.value = await loadMap(props.saveId);
     factions.value = await loadFactions(props.saveId);
   } catch (e) {
@@ -205,6 +213,22 @@ async function newMap() {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
     busy.value = false;
+  }
+}
+
+/** Avança um turno: cada facção ganha a produção das suas províncias. */
+async function nextTurn() {
+  advancing.value = true;
+  err.value = "";
+  try {
+    const res = await advanceTurn(props.saveId);
+    turn.value = res.turn;
+    factions.value = res.factions;
+    flashToast(`Turno ${res.turn} — ${formatTurnDate(res.turn)}`);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    advancing.value = false;
   }
 }
 
@@ -550,6 +574,17 @@ function provinceFill(p: Province): string {
           ⛶
         </button>
       </nav>
+
+      <!-- Caixa de turno (canto inferior direito) -->
+      <div class="turn-box">
+        <div class="turn-info">
+          <span class="turn-num">Turno {{ turn }}</span>
+          <span class="turn-date">{{ currentDate }}</span>
+        </div>
+        <button class="turn-btn" :disabled="advancing" @click="nextTurn">
+          {{ advancing ? "Processando..." : "Próximo turno ▶" }}
+        </button>
+      </div>
 
       <!-- Painel da província (contextual, ao clicar) -->
       <Transition name="rise">
@@ -958,6 +993,53 @@ function provinceFill(p: Province): string {
   margin: 2px 5px;
 }
 
+/* ===== Caixa de turno ===== */
+.turn-box {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 244px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  background: linear-gradient(180deg, var(--panel-a) 0%, var(--panel-b) 100%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.6);
+}
+.turn-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 2px;
+}
+.turn-num {
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+.turn-date {
+  font-size: 1.08rem;
+  font-weight: 700;
+  color: #fff;
+}
+.turn-btn {
+  width: 100%;
+  padding: 13px;
+  font-size: 1rem;
+  font-weight: 800;
+  background: linear-gradient(180deg, #f0c558 0%, #d8a233 100%);
+  border-color: #f0c558;
+  color: #20160a;
+}
+.turn-btn:hover:not(:disabled) {
+  color: #20160a;
+  filter: brightness(1.07);
+}
+
 /* ===== Cartões / painéis ===== */
 .card {
   background: linear-gradient(180deg, var(--panel-a) 0%, var(--panel-b) 100%);
@@ -1138,7 +1220,7 @@ function provinceFill(p: Province): string {
   position: absolute;
   right: 14px;
   top: 70px;
-  bottom: 66px;
+  bottom: 138px;
   width: 330px;
   display: flex;
   flex-direction: column;

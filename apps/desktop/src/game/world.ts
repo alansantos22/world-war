@@ -54,6 +54,7 @@ interface SaveRow {
   name: string;
   created_at: string;
   updated_at: string;
+  turn: number;
   player_code: string | null;
   custom_name: string | null;
   custom_color: string | null;
@@ -67,6 +68,8 @@ export interface GameSave {
   name: string;
   createdAt: string;
   updatedAt: string;
+  /** Turno atual da partida (começa em 1). */
+  turn: number;
   /** Código da nação controlada pelo jogador. */
   playerCode: string | null;
   /** Nação criada pelo jogador, ou `null` se ele escolheu uma nação fixa. */
@@ -102,6 +105,7 @@ export async function ensureSchema(): Promise<void> {
       name             TEXT    NOT NULL,
       created_at       TEXT    NOT NULL,
       updated_at       TEXT    NOT NULL,
+      turn             INTEGER NOT NULL DEFAULT 1,
       player_code      TEXT,
       custom_name      TEXT,
       custom_color     TEXT,
@@ -124,6 +128,12 @@ export async function ensureSchema(): Promise<void> {
     if (!haveCol.has(col)) {
       await db.execute(`ALTER TABLE saves ADD COLUMN ${col} TEXT`);
     }
+  }
+  // Migração: a coluna do turno (saves anteriores ao sistema de turnos).
+  if (!haveCol.has('turn')) {
+    await db.execute(
+      'ALTER TABLE saves ADD COLUMN turn INTEGER NOT NULL DEFAULT 1',
+    );
   }
 
   // Tabela das facções: uma linha por nação em cada partida.
@@ -380,6 +390,7 @@ export async function getSave(saveId: number): Promise<GameSave> {
     name: r.name,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    turn: r.turn,
     playerCode: r.player_code,
     customNation: customNationFromRow(r),
   };
@@ -430,4 +441,61 @@ export async function regenerateMap(saveId: number): Promise<Province[]> {
   );
   await touchSave(saveId);
   return readProvinces(saveId);
+}
+
+/** O que `advanceTurn` devolve: o novo turno e as facções atualizadas. */
+export interface TurnResult {
+  turn: number;
+  factions: FactionState[];
+}
+
+/**
+ * Avança a partida em um turno: cada facção recebe o **manpower** e os
+ * **pontos de pesquisa** produzidos pelas suas províncias (as capitais já
+ * produzem o dobro — ver `map-generator`). Dinheiro e influência ainda não
+ * têm fonte de produção, então não mudam.
+ */
+export async function advanceTurn(saveId: number): Promise<TurnResult> {
+  await ensureSchema();
+  const db = await getDb();
+  const save = await getSave(saveId);
+  const provinces = await readProvinces(saveId);
+  const factions = await loadFactions(saveId);
+
+  // Soma, por facção, a produção de manpower e pesquisa das suas províncias.
+  const gain = new Map<string, { manpower: number; research: number }>();
+  for (const p of provinces) {
+    if (!p.ownerCode) continue;
+    const g = gain.get(p.ownerCode) ?? { manpower: 0, research: 0 };
+    g.manpower += p.manpowerProduction;
+    g.research += p.researchProduction;
+    gain.set(p.ownerCode, g);
+  }
+
+  const turn = save.turn + 1;
+  await db.execute('BEGIN');
+  try {
+    for (const f of factions) {
+      const g = gain.get(f.code);
+      if (!g) continue;
+      f.manpower += g.manpower;
+      f.researchPoints += g.research;
+      await db.execute(
+        `UPDATE factions SET manpower = ?, research_points = ?
+         WHERE save_id = ? AND code = ?`,
+        [f.manpower, f.researchPoints, saveId, f.code],
+      );
+    }
+    await db.execute('UPDATE saves SET turn = ?, updated_at = ? WHERE id = ?', [
+      turn,
+      new Date().toISOString(),
+      saveId,
+    ]);
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+
+  return { turn, factions };
 }
