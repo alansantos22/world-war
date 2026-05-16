@@ -8,7 +8,12 @@ import { ALIGNMENTS, ALIGNMENT_LIST } from "../game/alignments";
 import { ResourceType } from "../game/enums";
 import { resourceInfo, resourceBoost } from "../game/resources";
 import { FACTION_STATS, TERRITORY_STATS, type FactionState } from "../game/economy";
-import { climateInfo, seasonForMonth, SEASONS } from "../game/climate";
+import {
+  climateInfo,
+  seasonForMonth,
+  SEASONS,
+  ClimateZone,
+} from "../game/climate";
 import { formatTurnDate, turnDate } from "../game/turns";
 import {
   loadMap,
@@ -20,6 +25,26 @@ import {
   type GameSave,
 } from "../game/world";
 import { renameSave } from "../game/saves";
+import {
+  SQUAD_COST,
+  SQUAD_MANPOWER_COST,
+  TROOP_TYPES,
+  squadForce,
+  squadUpkeep,
+  maxTroops,
+  isSquadReady,
+  canSquadMove,
+  loadSquads,
+  createSquad,
+  deleteSquad,
+  moveSquad,
+  loadRecruitOrders,
+  queueRecruit,
+  cancelRecruit,
+  type Squad,
+  type RecruitOrder,
+  type TroopKind,
+} from "../game/squads";
 import { loadSettings } from "../settings";
 
 const props = defineProps<{ saveId: number }>();
@@ -38,6 +63,20 @@ const advancing = ref(false);
 const loading = ref(true);
 const err = ref("");
 const busy = ref(false);
+
+// ===== Esquadrões =====
+const squads = ref<Squad[]>([]);
+/** Esquadrão em modo de movimento (aguardando o clique no tile destino). */
+const moveMode = ref<Squad | null>(null);
+const busySquad = ref(false);
+
+// ===== Recrutamento =====
+/** Ordens de recrutamento (fila de produção das cidades). */
+const recruitOrders = ref<RecruitOrder[]>([]);
+/** `true` quando o painel da província mostra o recrutamento, não a info. */
+const recruitOpen = ref(false);
+/** Esquadrão alvo escolhido no painel de recrutamento. */
+const recruitSquadId = ref<number | null>(null);
 
 const mode = ref<"political" | "resource" | "climate">("political");
 const selected = ref<Province | null>(null);
@@ -178,12 +217,38 @@ function onPanEnd() {
   window.removeEventListener("mouseup", onPanEnd);
 }
 
+/** Dois tiles são vizinhos se distam 1 célula (8 direções). */
+function isAdjacent(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): boolean {
+  return (
+    Math.abs(a.x - b.x) <= 1 &&
+    Math.abs(a.y - b.y) <= 1 &&
+    !(a.x === b.x && a.y === b.y)
+  );
+}
+
 // Clique numa província (ignora se foi um arraste do mapa).
 function onProvinceClick(p: Province) {
-  if (!panMoved.value) selected.value = p;
+  if (panMoved.value) return;
+  // Em modo de movimento: clicar num tile vizinho move o esquadrão para lá.
+  if (moveMode.value) {
+    const sq = moveMode.value;
+    if (isAdjacent(p, sq)) {
+      void doMove(sq, p);
+      return;
+    }
+    moveMode.value = null;
+  }
+  recruitOpen.value = false;
+  selected.value = p;
 }
 function onOceanClick() {
-  if (!panMoved.value) selected.value = null;
+  if (panMoved.value) return;
+  moveMode.value = null;
+  recruitOpen.value = false;
+  selected.value = null;
 }
 
 async function load() {
@@ -198,6 +263,8 @@ async function load() {
     turn.value = save.turn;
     provinces.value = await loadMap(props.saveId);
     factions.value = await loadFactions(props.saveId);
+    squads.value = await loadSquads(props.saveId);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -209,8 +276,12 @@ async function newMap() {
   busy.value = true;
   err.value = "";
   selected.value = null;
+  moveMode.value = null;
+  recruitOpen.value = false;
   try {
     provinces.value = await regenerateMap(props.saveId);
+    squads.value = await loadSquads(props.saveId);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -226,11 +297,231 @@ async function nextTurn() {
     const res = await advanceTurn(props.saveId);
     turn.value = res.turn;
     factions.value = res.factions;
+    squads.value = await loadSquads(props.saveId);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
     flashToast(`Turno ${res.turn} — ${formatTurnDate(res.turn)}`);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
     advancing.value = false;
+  }
+}
+
+// ===== Ações dos esquadrões =====
+
+/** Esquadrões posicionados na província selecionada. */
+const squadsOnSelected = computed<Squad[]>(() =>
+  selected.value
+    ? squads.value.filter(
+        (s) => s.x === selected.value!.x && s.y === selected.value!.y,
+      )
+    : [],
+);
+
+/** Esquadrões agrupados por tile — um marcador por célula no mapa. */
+const squadTiles = computed(() => {
+  const m = new Map<string, { x: number; y: number; squads: Squad[] }>();
+  for (const s of squads.value) {
+    const k = `${s.x},${s.y}`;
+    let t = m.get(k);
+    if (!t) {
+      t = { x: s.x, y: s.y, squads: [] };
+      m.set(k, t);
+    }
+    t.squads.push(s);
+  }
+  return [...m.values()];
+});
+
+/** Cor do marcador de um tile: a da nação dona, ou cinza se houver mistura. */
+function squadTileColor(t: { squads: Squad[] }): string {
+  const owners = new Set(t.squads.map((s) => s.ownerCode));
+  return owners.size === 1
+    ? nationOf(t.squads[0].ownerCode)?.color ?? "#dfe3ea"
+    : "#dfe3ea";
+}
+
+/** Tiles vizinhos válidos para onde o esquadrão em movimento pode ir. */
+const moveTargets = computed<Province[]>(() =>
+  moveMode.value
+    ? provinces.value.filter((p) => isAdjacent(p, moveMode.value!))
+    : [],
+);
+
+/** Monta um esquadrão na província selecionada (custa `SQUAD_COST`). */
+async function createSquadHere() {
+  const p = selected.value;
+  if (!p || !p.ownerCode || p.ownerCode !== game.value?.playerCode) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await createSquad(props.saveId, p.ownerCode, p.x, p.y, turn.value);
+    squads.value = await loadSquads(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+    flashToast("Esquadrão montado — fica pronto no próximo turno.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Exclui um esquadrão do jogador (reembolsa a fila de recrutamento dele). */
+async function removeSquad(s: Squad) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await deleteSquad(s.id);
+    if (moveMode.value?.id === s.id) moveMode.value = null;
+    squads.value = await loadSquads(props.saveId);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+    flashToast("Esquadrão excluído.");
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Entra no modo de movimento: o próximo clique escolhe o tile destino. */
+function startMove(s: Squad) {
+  moveMode.value = moveMode.value?.id === s.id ? null : s;
+}
+
+/** Move um esquadrão para um tile vizinho, gastando o turno dele. */
+async function doMove(s: Squad, dest: Province) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await moveSquad(s.id, dest.x, dest.y, turn.value);
+    squads.value = await loadSquads(props.saveId);
+    selected.value = dest;
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+    moveMode.value = null;
+  }
+}
+
+// ===== Recrutamento de tropas =====
+
+/** Mapa de células → província, para consultar o terreno de um esquadrão. */
+const provinceByTile = computed(
+  () => new Map(provinces.value.map((p) => [`${p.x},${p.y}`, p])),
+);
+
+/** `true` se o esquadrão está sobre um tile gelado (move-se a cada 2 turnos). */
+function isSquadOnGlacial(s: Squad): boolean {
+  return (
+    provinceByTile.value.get(`${s.x},${s.y}`)?.climate === ClimateZone.GELADO
+  );
+}
+
+/** Esquadrões do jogador na província selecionada. */
+const playerSquadsHere = computed<Squad[]>(() =>
+  squadsOnSelected.value.filter((s) => s.ownerCode === game.value?.playerCode),
+);
+
+/** `true` se dá para recrutar na província selecionada (cidade sua + esquadrão). */
+const canRecruitHere = computed(
+  () =>
+    !!selected.value &&
+    selected.value.ownerCode === game.value?.playerCode &&
+    playerSquadsHere.value.length > 0,
+);
+
+/** Esquadrão alvo do recrutamento (o escolhido, ou o 1º do tile). */
+const recruitTarget = computed<Squad | null>(() => {
+  const list = playerSquadsHere.value;
+  return list.find((s) => s.id === recruitSquadId.value) ?? list[0] ?? null;
+});
+
+/** Ordens de recrutamento na fila da província selecionada. */
+const recruitOrdersHere = computed<RecruitOrder[]>(() =>
+  selected.value
+    ? recruitOrders.value.filter(
+        (o) => o.x === selected.value!.x && o.y === selected.value!.y,
+      )
+    : [],
+);
+
+/** Quantas ordens estão na fila de um esquadrão. */
+function pendingOrdersFor(squadId: number): number {
+  return recruitOrders.value.filter((o) => o.squadId === squadId).length;
+}
+
+/** Tropas atuais somadas às que estão na fila de um esquadrão. */
+function troopsWithPending(s: Squad): number {
+  return s.troops.length + pendingOrdersFor(s.id);
+}
+
+/** Turnos restantes para concluir uma ordem na cidade selecionada. */
+function recruitEta(o: RecruitOrder): number {
+  const prod = selected.value?.production ?? 0;
+  if (prod <= 0) return Infinity;
+  return Math.ceil((o.prodCost - o.prodDone) / prod);
+}
+
+/** Turnos para produzir uma tropa nova, do zero, nesta cidade. */
+function troopBuildTurns(kind: TroopKind): number {
+  const prod = selected.value?.production ?? 0;
+  if (prod <= 0) return Infinity;
+  return Math.ceil(TROOP_TYPES[kind].productionCost / prod);
+}
+
+/** `true` se o esquadrão alvo já está no limite de tropas (tropas + fila). */
+const recruitTargetFull = computed(
+  () =>
+    !!recruitTarget.value &&
+    troopsWithPending(recruitTarget.value) >=
+      maxTroops(recruitTarget.value.commander.stars),
+);
+
+/** Abre o painel de recrutamento da cidade selecionada. */
+function openRecruit() {
+  if (!canRecruitHere.value) return;
+  if (
+    recruitSquadId.value == null ||
+    !playerSquadsHere.value.some((s) => s.id === recruitSquadId.value)
+  ) {
+    recruitSquadId.value = playerSquadsHere.value[0]?.id ?? null;
+  }
+  recruitOpen.value = true;
+}
+
+/** Enfileira o recrutamento de uma tropa para o esquadrão alvo. */
+async function doRecruit(kind: TroopKind) {
+  const p = selected.value;
+  const target = recruitTarget.value;
+  if (!p || !p.ownerCode || !target) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await queueRecruit(props.saveId, p.ownerCode, p.x, p.y, target.id, kind);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+    flashToast(`${TROOP_TYPES[kind].label} adicionada à fila.`);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Cancela uma ordem de recrutamento e devolve os recursos pagos. */
+async function doCancelRecruit(orderId: number) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await cancelRecruit(orderId);
+    recruitOrders.value = await loadRecruitOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
   }
 }
 
@@ -543,6 +834,57 @@ function provinceFill(p: Province): string {
       >
         ★
       </text>
+      <!-- Destinos válidos do esquadrão em movimento -->
+      <rect
+        v-for="p in moveTargets"
+        :key="'mt' + p.id"
+        :x="p.x"
+        :y="p.y"
+        width="1.02"
+        height="1.02"
+        fill="rgba(95,200,120,0.26)"
+        stroke="#5fd07a"
+        stroke-width="0.12"
+        style="pointer-events: none"
+      />
+      <!-- Marcadores dos esquadrões -->
+      <g
+        v-for="t in squadTiles"
+        :key="'sq' + t.x + '-' + t.y"
+        style="pointer-events: none"
+      >
+        <circle
+          :cx="t.x + 0.5"
+          :cy="t.y + 0.33"
+          r="0.33"
+          :fill="squadTileColor(t)"
+          stroke="#0c0f16"
+          stroke-width="0.07"
+        />
+        <text
+          :x="t.x + 0.5"
+          :y="t.y + 0.35"
+          text-anchor="middle"
+          dominant-baseline="central"
+          font-size="0.4"
+        >
+          ⚔️
+        </text>
+        <text
+          v-if="t.squads.length > 1"
+          :x="t.x + 0.84"
+          :y="t.y + 0.11"
+          text-anchor="middle"
+          dominant-baseline="central"
+          font-size="0.36"
+          fill="#fff"
+          stroke="#000"
+          stroke-width="0.08"
+          paint-order="stroke"
+        >
+          {{ t.squads.length }}
+        </text>
+      </g>
     </svg>
 
     <p v-if="loading" class="center-msg">Carregando o mundo...</p>
@@ -619,6 +961,17 @@ function provinceFill(p: Province): string {
 
       <p v-if="err" class="hud-error">ERRO: {{ err }}</p>
 
+      <!-- Aviso do modo de movimento de esquadrão -->
+      <Transition name="rise">
+        <div v-if="moveMode" class="move-banner">
+          <span>
+            ➤ Movendo o Esquadrão #{{ moveMode.id }} — clique num tile vizinho
+            destacado
+          </span>
+          <button @click="moveMode = null">Cancelar</button>
+        </div>
+      </Transition>
+
       <!-- Barra lateral: ações do jogo, só ícones -->
       <nav class="sidebar">
         <button
@@ -674,6 +1027,8 @@ function provinceFill(p: Province): string {
       <!-- Painel da província (contextual, ao clicar) -->
       <Transition name="rise">
         <section v-if="selected" class="card province">
+          <!-- ===== Vista: informações do território ===== -->
+          <template v-if="!recruitOpen">
           <div class="card-head">
             <div class="head-title">
               <span class="prov-name">{{ selected.name }}</span>
@@ -780,6 +1135,18 @@ function provinceFill(p: Province): string {
             </span>
           </div>
 
+          <!-- Força de batalha do território (tomada hostil) -->
+          <div class="battle-line">
+            <span class="bf-icon">⚔️</span>
+            <div class="bf-info">
+              <span class="bf-label">Força de batalha</span>
+              <span class="bf-val">{{ selected.battleForce }}</span>
+            </div>
+            <span v-if="selected.conquered" class="bf-tag">
+              Tomado de outra facção
+            </span>
+          </div>
+
           <div class="prod-head">Produção por turno</div>
           <div class="prod-grid">
             <div
@@ -802,6 +1169,302 @@ function provinceFill(p: Province): string {
               </span>
             </div>
           </div>
+
+          <!-- Esquadrões neste território -->
+          <div class="squad-head">
+            <span>Esquadrões aqui</span>
+            <span class="squad-count">{{ squadsOnSelected.length }}</span>
+          </div>
+          <div class="squad-list">
+            <div
+              v-for="s in squadsOnSelected"
+              :key="s.id"
+              class="squad-row"
+              :style="{ '--sc': nationOf(s.ownerCode)?.color ?? NEUTRAL_COLOR }"
+            >
+              <span class="squad-bar"></span>
+              <div class="squad-body">
+                <div class="squad-title">
+                  <span>⚔️ Esquadrão #{{ s.id }}</span>
+                  <span class="squad-stars" title="Estrelas do comandante">
+                    {{ "★".repeat(s.commander.stars) }}
+                  </span>
+                  <span
+                    class="squad-state"
+                    :class="isSquadReady(s, turn) ? 'ready' : 'prep'"
+                  >
+                    {{ isSquadReady(s, turn) ? "Pronto" : "Em preparação" }}
+                  </span>
+                </div>
+                <div class="squad-stats">
+                  <span title="Força de batalha do esquadrão">
+                    ⚔️ {{ squadForce(s) }}
+                  </span>
+                  <span title="Tropas (limite definido pelas estrelas)">
+                    🪖 {{ s.troops.length }}/{{
+                      maxTroops(s.commander.stars)
+                    }}
+                  </span>
+                  <span title="Vida do comandante">
+                    ❤️ {{ s.commander.hp }}/{{ s.commander.maxHp }}
+                  </span>
+                  <span title="Defesa do comandante">
+                    🛡️ {{ s.commander.defense }}
+                  </span>
+                  <span title="Manutenção por turno">
+                    💰 {{ squadUpkeep(s) }}/turno
+                  </span>
+                </div>
+                <div class="squad-acts">
+                  <template v-if="s.ownerCode === game?.playerCode">
+                    <button
+                      class="sbtn"
+                      :class="{ on: moveMode?.id === s.id }"
+                      :disabled="
+                        busySquad || !canSquadMove(s, turn, isSquadOnGlacial(s))
+                      "
+                      :title="
+                        !isSquadReady(s, turn)
+                          ? 'Em preparação — pronto no próximo turno'
+                          : !canSquadMove(s, turn, isSquadOnGlacial(s))
+                            ? isSquadOnGlacial(s)
+                              ? 'Tile gelado — leva 2 turnos para avançar'
+                              : 'Já se moveu neste turno'
+                            : 'Mover esquadrão'
+                      "
+                      @click="startMove(s)"
+                    >
+                      ➤ Mover
+                    </button>
+                    <button
+                      class="sbtn danger"
+                      :disabled="busySquad"
+                      @click="removeSquad(s)"
+                    >
+                      ✕ Excluir
+                    </button>
+                  </template>
+                  <button
+                    v-else
+                    class="sbtn"
+                    disabled
+                    title="Sistema de batalha — em breve"
+                  >
+                    ⚔️ Atacar
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p v-if="squadsOnSelected.length === 0" class="squad-empty">
+              Nenhum esquadrão neste território.
+            </p>
+          </div>
+
+          <!-- Ações da cidade do jogador: montar esquadrão e recrutar -->
+          <template v-if="selected.ownerCode === game?.playerCode">
+            <button
+              class="squad-create"
+              :disabled="
+                busySquad ||
+                (playerFaction?.money ?? 0) < SQUAD_COST ||
+                (playerFaction?.manpower ?? 0) < SQUAD_MANPOWER_COST
+              "
+              @click="createSquadHere"
+            >
+              ⚔️ Montar esquadrão · 💰 {{ SQUAD_COST }} ·
+              🪖 {{ SQUAD_MANPOWER_COST }}
+            </button>
+            <p
+              v-if="
+                (playerFaction?.money ?? 0) < SQUAD_COST ||
+                (playerFaction?.manpower ?? 0) < SQUAD_MANPOWER_COST
+              "
+              class="squad-warn"
+            >
+              Recursos insuficientes para montar um esquadrão.
+            </p>
+            <button
+              class="squad-recruit"
+              :disabled="!canRecruitHere"
+              :title="
+                canRecruitHere
+                  ? 'Abrir o recrutamento desta cidade'
+                  : 'É preciso um esquadrão seu neste tile para recrutar'
+              "
+              @click="openRecruit"
+            >
+              🪖 Recrutamento
+            </button>
+          </template>
+
+          <!-- Tomar território de forma hostil (sistema de batalha — em breve) -->
+          <button
+            v-if="!selected.ownerCode"
+            class="squad-take"
+            disabled
+            title="Sistema de batalha — em breve"
+          >
+            🚩 Tomar território (em breve)
+          </button>
+          </template>
+
+          <!-- ===== Vista: recrutamento de tropas ===== -->
+          <template v-else>
+            <div class="card-head">
+              <button
+                class="x back"
+                title="Voltar às informações do território"
+                @click="recruitOpen = false"
+              >
+                ‹
+              </button>
+              <div class="head-title">🪖 Recrutamento</div>
+              <button class="x" @click="selected = null">✕</button>
+            </div>
+            <p class="sub">
+              {{ selected.name }}
+              <span class="dimsep">·</span>
+              produção {{ selected.production }}/turno
+            </p>
+
+            <!-- Esquadrão que receberá as tropas -->
+            <div v-if="playerSquadsHere.length" class="rc-block">
+              <div class="rc-label">Esquadrão que vai receber a tropa</div>
+              <div class="rc-squads">
+                <button
+                  v-for="s in playerSquadsHere"
+                  :key="s.id"
+                  class="rc-squad"
+                  :class="{ on: recruitTarget?.id === s.id }"
+                  @click="recruitSquadId = s.id"
+                >
+                  ⚔️ #{{ s.id }}
+                  <span class="rc-squad-sub">
+                    {{ troopsWithPending(s) }}/{{
+                      maxTroops(s.commander.stars)
+                    }}
+                    tropas
+                  </span>
+                </button>
+              </div>
+            </div>
+            <p v-else class="squad-empty rc-pad">
+              Nenhum esquadrão seu neste território.
+            </p>
+
+            <!-- Tropas disponíveis para recrutamento -->
+            <div class="rc-block">
+              <div class="rc-label">Tropas disponíveis</div>
+              <div class="rc-troop">
+                <span class="rc-troop-icon">
+                  {{ TROOP_TYPES.INFANTARIA.icon }}
+                </span>
+                <div class="rc-troop-info">
+                  <div class="rc-troop-name">
+                    {{ TROOP_TYPES.INFANTARIA.label }}
+                  </div>
+                  <div class="rc-troop-stats">
+                    <span>⚔️ +{{ TROOP_TYPES.INFANTARIA.force }} força</span>
+                    <span>❤️ {{ TROOP_TYPES.INFANTARIA.hp }} vida</span>
+                  </div>
+                  <div class="rc-troop-costs">
+                    <span title="Custo em dinheiro">
+                      💰 {{ TROOP_TYPES.INFANTARIA.moneyCost }}
+                    </span>
+                    <span title="Custo em manpower">
+                      🪖 {{ TROOP_TYPES.INFANTARIA.manpowerCost }}
+                    </span>
+                    <span title="Produção (tempo de construção da cidade)">
+                      🏭 {{ TROOP_TYPES.INFANTARIA.productionCost }} · ~{{
+                        troopBuildTurns("INFANTARIA")
+                      }}
+                      turno(s)
+                    </span>
+                    <span title="Manutenção por turno">
+                      💸 {{ TROOP_TYPES.INFANTARIA.upkeep }}/turno
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button
+                class="squad-create rc-recruit-btn"
+                :disabled="
+                  busySquad ||
+                  !recruitTarget ||
+                  recruitTargetFull ||
+                  (playerFaction?.money ?? 0) <
+                    TROOP_TYPES.INFANTARIA.moneyCost ||
+                  (playerFaction?.manpower ?? 0) <
+                    TROOP_TYPES.INFANTARIA.manpowerCost
+                "
+                @click="doRecruit('INFANTARIA')"
+              >
+                Recrutar infantaria
+              </button>
+              <p v-if="recruitTargetFull" class="squad-warn">
+                O esquadrão alvo já atingiu o limite de tropas.
+              </p>
+              <p
+                v-else-if="
+                  recruitTarget &&
+                  ((playerFaction?.money ?? 0) <
+                    TROOP_TYPES.INFANTARIA.moneyCost ||
+                    (playerFaction?.manpower ?? 0) <
+                      TROOP_TYPES.INFANTARIA.manpowerCost)
+                "
+                class="squad-warn"
+              >
+                Recursos insuficientes para recrutar.
+              </p>
+            </div>
+
+            <!-- Fila de produção da cidade -->
+            <div class="rc-block">
+              <div class="rc-label">
+                <span>Fila de produção</span>
+                <span class="squad-count">{{ recruitOrdersHere.length }}</span>
+              </div>
+              <div
+                v-for="(o, i) in recruitOrdersHere"
+                :key="o.id"
+                class="rc-order"
+              >
+                <span class="rc-order-pos">{{ i + 1 }}</span>
+                <div class="rc-order-info">
+                  <div class="rc-order-name">
+                    {{ TROOP_TYPES[o.kind].label }}
+                    <span class="dim">→ Esquadrão #{{ o.squadId }}</span>
+                  </div>
+                  <div class="rc-progress">
+                    <div
+                      class="rc-progress-fill"
+                      :style="{
+                        width:
+                          Math.min(100, (o.prodDone / o.prodCost) * 100) + '%',
+                      }"
+                    ></div>
+                  </div>
+                  <div class="rc-order-meta">
+                    {{ o.prodDone }}/{{ o.prodCost }} produção
+                    <span class="dimsep">·</span>
+                    <span v-if="i === 0">~{{ recruitEta(o) }} turno(s)</span>
+                    <span v-else class="dim">aguardando na fila</span>
+                  </div>
+                </div>
+                <button
+                  class="sbtn danger rc-cancel"
+                  :disabled="busySquad"
+                  title="Cancelar — devolve o dinheiro e o manpower"
+                  @click="doCancelRecruit(o.id)"
+                >
+                  ✕
+                </button>
+              </div>
+              <p v-if="recruitOrdersHere.length === 0" class="squad-empty">
+                Nenhuma tropa em produção nesta cidade.
+              </p>
+            </div>
+          </template>
         </section>
       </Transition>
 
@@ -1225,6 +1888,8 @@ function provinceFill(p: Province): string {
   left: 70px;
   bottom: 14px;
   width: 320px;
+  max-height: calc(100vh - 30px);
+  overflow-y: auto;
 }
 .province .sub,
 .province .owner,
@@ -1427,6 +2092,384 @@ function provinceFill(p: Province): string {
   font-size: 0.6rem;
   color: #8a92a0;
 }
+
+/* ===== Força de batalha do território ===== */
+.battle-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 13px 0;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-left: 3px solid #cf6b4a;
+  border-radius: 8px;
+  padding: 8px 11px;
+}
+.bf-icon {
+  font-size: 1.4rem;
+}
+.bf-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  flex: 1;
+}
+.bf-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8a92a0;
+}
+.bf-val {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #e6917a;
+}
+.bf-tag {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: #e8b84a;
+  background: rgba(232, 168, 74, 0.16);
+  border: 1px solid rgba(232, 168, 74, 0.38);
+  border-radius: 4px;
+  padding: 3px 6px;
+  text-align: center;
+}
+
+/* ===== Esquadrões no painel da província ===== */
+.squad-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 13px 0;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: #8a92a0;
+}
+.squad-count {
+  font-weight: 800;
+  color: #cdd2da;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 1px 8px;
+}
+.squad-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 13px 0;
+}
+.squad-row {
+  display: flex;
+  gap: 9px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.squad-bar {
+  width: 4px;
+  border-radius: 3px;
+  background: var(--sc);
+  flex: none;
+}
+.squad-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.squad-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 0.86rem;
+  color: #fff;
+}
+.squad-stars {
+  color: var(--gold);
+  letter-spacing: 1px;
+}
+.squad-state {
+  font-size: 0.56rem;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  text-transform: uppercase;
+}
+.squad-state.ready {
+  color: #71c98a;
+  background: rgba(70, 170, 90, 0.18);
+}
+.squad-state.prep {
+  color: #e8b84a;
+  background: rgba(232, 168, 74, 0.16);
+}
+.squad-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 0.78rem;
+  color: #cdd2da;
+}
+.squad-acts {
+  display: flex;
+  gap: 6px;
+}
+.sbtn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  border-radius: 7px;
+}
+.sbtn.on {
+  background: linear-gradient(180deg, #f0c558 0%, #d8a233 100%);
+  border-color: #f0c558;
+  color: #20160a;
+}
+.sbtn.danger:hover:not(:disabled) {
+  border-color: #cf6b4a;
+  color: #e6917a;
+}
+.squad-empty {
+  color: #7d8694;
+  font-size: 0.8rem;
+  font-style: italic;
+  margin: 2px 0;
+}
+.squad-create {
+  display: block;
+  width: auto;
+  margin: 10px 13px 0;
+  padding: 11px;
+  font-size: 0.9rem;
+  font-weight: 800;
+  background: linear-gradient(180deg, #3a4555 0%, #222a38 100%);
+  border-color: var(--gold);
+  color: var(--gold);
+}
+.squad-create:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: var(--gold);
+}
+.squad-warn {
+  margin: 6px 13px 0;
+  color: #e6917a;
+  font-size: 0.76rem;
+}
+.squad-take {
+  display: block;
+  width: auto;
+  margin: 10px 13px 14px;
+  padding: 10px;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+.squad-create + .squad-warn {
+  margin-bottom: 14px;
+}
+.squad-create:last-child,
+.squad-warn:last-child {
+  margin-bottom: 14px;
+}
+
+/* Botão de abrir o recrutamento */
+.squad-recruit {
+  display: block;
+  width: auto;
+  margin: 8px 13px 14px;
+  padding: 10px;
+  font-size: 0.88rem;
+  font-weight: 800;
+  background: linear-gradient(180deg, #3a4555 0%, #222a38 100%);
+  border-color: #7fb86b;
+  color: #9ad187;
+}
+.squad-recruit:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: #9ad187;
+}
+
+/* Botão de voltar do recrutamento */
+.x.back {
+  font-size: 1.45rem;
+  line-height: 1;
+  color: var(--gold);
+}
+.x.back:hover {
+  color: #fff;
+}
+
+/* ===== Recrutamento ===== */
+.rc-block {
+  margin: 12px 13px 0;
+}
+.rc-block:last-child {
+  margin-bottom: 14px;
+}
+.rc-pad {
+  margin: 12px 13px 0;
+}
+.rc-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: #8a92a0;
+}
+.rc-squads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.rc-squad {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 10px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.rc-squad.on {
+  background: linear-gradient(180deg, #f0c558 0%, #d8a233 100%);
+  border-color: #f0c558;
+  color: #20160a;
+}
+.rc-squad-sub {
+  font-size: 0.62rem;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.rc-troop {
+  display: flex;
+  gap: 11px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 11px;
+}
+.rc-troop-icon {
+  font-size: 1.9rem;
+}
+.rc-troop-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.rc-troop-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+}
+.rc-troop-stats,
+.rc-troop-costs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.74rem;
+  color: #cdd2da;
+}
+.rc-troop-costs {
+  color: #9aa0ac;
+}
+.rc-recruit-btn {
+  margin: 9px 0 0;
+}
+.rc-order {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.rc-order + .rc-order {
+  margin-top: 7px;
+}
+.rc-order-pos {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #cdd2da;
+}
+.rc-order-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rc-order-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #fff;
+}
+.rc-progress {
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.rc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7fb86b, #9ad187);
+}
+.rc-order-meta {
+  font-size: 0.68rem;
+  color: #9aa0ac;
+}
+.rc-cancel {
+  flex: none;
+  width: 30px;
+  padding: 6px 0;
+}
+
+/* ===== Aviso do modo de movimento ===== */
+.move-banner {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(180deg, #2a3242 0%, #161b27 100%);
+  border: 1px solid var(--gold);
+  color: #fff;
+  font-size: 0.84rem;
+  font-weight: 600;
+  padding: 9px 14px;
+  border-radius: 9px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+.move-banner button {
+  padding: 5px 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .panel {
   position: absolute;
   right: 14px;

@@ -45,6 +45,10 @@ export interface GeneratedProvince extends TerritoryProduction {
   seismic: boolean;
   /** `true` se há um vulcão na província. */
   volcano: boolean;
+  /** Força de batalha a derrubar para tomar o território de forma hostil. */
+  battleForce: number;
+  /** `true` se o território foi tomado de outra facção (não neutro). */
+  conquered: boolean;
 }
 
 export interface GeneratedMap {
@@ -240,6 +244,8 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
         climate: climateOf(cell.y),
         seismic: false,
         volcano: false,
+        battleForce: 0,
+        conquered: false,
         manpowerProduction: 0,
         resourceProduction: 0,
         production: 0,
@@ -331,11 +337,14 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
 
   // 5. Sorteia a produção por turno de cada província (capitais já marcadas).
   //    A produção do recurso local ainda leva o multiplicador de clima.
+  //    Cada província também recebe a sua FORÇA DE BATALHA — quanto é preciso
+  //    derrubar para tomá-la de forma hostil; as capitais resistem o dobro.
   for (const p of provinces) {
     Object.assign(p, rollProduction(p.isCapital));
     p.resourceProduction = Math.round(
       p.resourceProduction * resourceBoost(p.resource, p.climate, p.continent),
     );
+    p.battleForce = randInt(20, 80) * (p.isCapital ? 2 : 1);
   }
 
   // 6. Zonas sísmicas (anel de fogo) e vulcões.
