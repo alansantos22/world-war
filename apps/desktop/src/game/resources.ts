@@ -1,4 +1,5 @@
 import { ResourceType } from './enums';
+import { ClimateZone } from './climate';
 
 export type ResourceTier = 'RARO' | 'COMUM';
 
@@ -116,4 +117,44 @@ export const RESOURCES: Record<ResourceType, ResourceInfo> = {
 
 export function resourceInfo(key: ResourceType): ResourceInfo {
   return RESOURCES[key];
+}
+
+/**
+ * Multiplicador da **produção do recurso local** conforme o clima da
+ * província. Recursos/combinações sem entrada usam 1× (sem bônus).
+ */
+const CLIMATE_BOOST: Partial<
+  Record<ResourceType, Partial<Record<ClimateZone, number>>>
+> = {
+  [ResourceType.TERRAS_AGRICOLAS]: {
+    [ClimateZone.AMENO]: 2,
+    [ClimateZone.TROPICAL]: 1.5,
+    [ClimateZone.GELADO]: 0.75,
+    [ClimateZone.DESERTICO]: 0.5,
+  },
+  [ResourceType.MADEIRA]: {
+    [ClimateZone.TROPICAL]: 2,
+    [ClimateZone.AMENO]: 1,
+    [ClimateZone.GELADO]: 0.75,
+    [ClimateZone.DESERTICO]: 0.5,
+  },
+  [ResourceType.PETROLEO]: {
+    [ClimateZone.DESERTICO]: 1.75,
+    [ClimateZone.GELADO]: 1.5,
+  },
+};
+
+/**
+ * Multiplicador da produção do recurso local de uma província. Depende do
+ * clima — e, no caso do Nióbio, do continente (2× na América do Sul, `S`).
+ */
+export function resourceBoost(
+  resource: ResourceType,
+  climate: ClimateZone,
+  continent: string,
+): number {
+  if (resource === ResourceType.NIOBIO) {
+    return continent === 'S' ? 2 : 1;
+  }
+  return CLIMATE_BOOST[resource]?.[climate] ?? 1;
 }

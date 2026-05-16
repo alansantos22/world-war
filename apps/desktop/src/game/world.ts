@@ -13,6 +13,7 @@ import {
   STARTING_FACTION,
   TerritoryProduction,
 } from './economy';
+import { ClimateZone } from './climate';
 
 /** Uma província do mapa já persistida (1 célula de terra, com id do banco). */
 export interface Province extends TerritoryProduction {
@@ -24,6 +25,12 @@ export interface Province extends TerritoryProduction {
   resource: ResourceType;
   ownerCode: string | null;
   isCapital: boolean;
+  /** Zona de clima da província. */
+  climate: ClimateZone;
+  /** `true` se a província fica numa zona sísmica (anel de fogo). */
+  seismic: boolean;
+  /** `true` se há um vulcão na província. */
+  volcano: boolean;
 }
 
 interface ProvinceRow {
@@ -39,6 +46,10 @@ interface ProvinceRow {
   resource_prod: number;
   production: number;
   research_prod: number;
+  culture_prod: number;
+  climate: string;
+  seismic: number;
+  volcano: number;
 }
 
 interface FactionRow {
@@ -47,6 +58,7 @@ interface FactionRow {
   influence: number;
   manpower: number;
   research_points: number;
+  culture: number;
 }
 
 interface SaveRow {
@@ -145,9 +157,19 @@ export async function ensureSchema(): Promise<void> {
       money           INTEGER NOT NULL,
       influence       INTEGER NOT NULL,
       manpower        INTEGER NOT NULL,
-      research_points INTEGER NOT NULL
+      research_points INTEGER NOT NULL,
+      culture         INTEGER NOT NULL DEFAULT 0
     )
   `);
+  // Migração: a coluna de cultura (facções anteriores a esse valor).
+  const factionCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(factions)',
+  );
+  if (!factionCols.some((c) => c.name === 'culture')) {
+    await db.execute(
+      'ALTER TABLE factions ADD COLUMN culture INTEGER NOT NULL DEFAULT 0',
+    );
+  }
 
   const cols = await db.select<{ name: string }[]>(
     'PRAGMA table_info(provinces)',
@@ -167,7 +189,11 @@ export async function ensureSchema(): Promise<void> {
         manpower_prod INTEGER NOT NULL DEFAULT 0,
         resource_prod INTEGER NOT NULL DEFAULT 0,
         production    INTEGER NOT NULL DEFAULT 0,
-        research_prod INTEGER NOT NULL DEFAULT 0
+        research_prod INTEGER NOT NULL DEFAULT 0,
+        culture_prod  INTEGER NOT NULL DEFAULT 0,
+        climate       TEXT    NOT NULL DEFAULT 'AMENO',
+        seismic       INTEGER NOT NULL DEFAULT 0,
+        volcano       INTEGER NOT NULL DEFAULT 0
       )
     `);
   } else if (!cols.some((c) => c.name === 'save_id')) {
@@ -198,12 +224,20 @@ export async function ensureSchema(): Promise<void> {
     'resource_prod',
     'production',
     'research_prod',
+    'culture_prod',
+    'seismic',
+    'volcano',
   ]) {
     if (!haveProvCol.has(col)) {
       await db.execute(
         `ALTER TABLE provinces ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`,
       );
     }
+  }
+  if (!haveProvCol.has('climate')) {
+    await db.execute(
+      "ALTER TABLE provinces ADD COLUMN climate TEXT NOT NULL DEFAULT 'AMENO'",
+    );
   }
 }
 
@@ -221,6 +255,10 @@ function rowToProvince(r: ProvinceRow): Province {
     resourceProduction: r.resource_prod,
     production: r.production,
     researchProduction: r.research_prod,
+    cultureProduction: r.culture_prod,
+    climate: r.climate as ClimateZone,
+    seismic: r.seismic === 1,
+    volcano: r.volcano === 1,
   };
 }
 
@@ -231,6 +269,7 @@ function rowToFaction(r: FactionRow): FactionState {
     influence: r.influence,
     manpower: r.manpower,
     researchPoints: r.research_points,
+    culture: r.culture,
   };
 }
 
@@ -260,8 +299,9 @@ async function insertProvinces(
       await db.execute(
         `INSERT INTO provinces
            (save_id, x, y, continent, name, resource, owner_code, is_capital,
-            manpower_prod, resource_prod, production, research_prod)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            manpower_prod, resource_prod, production, research_prod, culture_prod,
+            climate, seismic, volcano)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           saveId,
           p.x,
@@ -275,6 +315,10 @@ async function insertProvinces(
           p.resourceProduction,
           p.production,
           p.researchProduction,
+          p.cultureProduction,
+          p.climate,
+          p.seismic ? 1 : 0,
+          p.volcano ? 1 : 0,
         ],
       );
     }
@@ -292,9 +336,17 @@ async function insertFactions(saveId: number, codes: string[]): Promise<void> {
   for (const code of codes) {
     await db.execute(
       `INSERT INTO factions
-         (save_id, code, money, influence, manpower, research_points)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [saveId, code, s.money, s.influence, s.manpower, s.researchPoints],
+         (save_id, code, money, influence, manpower, research_points, culture)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        saveId,
+        code,
+        s.money,
+        s.influence,
+        s.manpower,
+        s.researchPoints,
+        s.culture,
+      ],
     );
   }
 }
@@ -450,10 +502,10 @@ export interface TurnResult {
 }
 
 /**
- * Avança a partida em um turno: cada facção recebe o **manpower** e os
- * **pontos de pesquisa** produzidos pelas suas províncias (as capitais já
- * produzem o dobro — ver `map-generator`). Dinheiro e influência ainda não
- * têm fonte de produção, então não mudam.
+ * Avança a partida em um turno: cada facção recebe o **manpower**, os
+ * **pontos de pesquisa** e a **cultura** produzidos pelas suas províncias (as
+ * capitais já produzem o dobro — ver `map-generator`). Dinheiro e influência
+ * ainda não têm fonte de produção, então não mudam.
  */
 export async function advanceTurn(saveId: number): Promise<TurnResult> {
   await ensureSchema();
@@ -462,13 +514,18 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const provinces = await readProvinces(saveId);
   const factions = await loadFactions(saveId);
 
-  // Soma, por facção, a produção de manpower e pesquisa das suas províncias.
-  const gain = new Map<string, { manpower: number; research: number }>();
+  // Soma, por facção, a produção das suas províncias.
+  const gain = new Map<
+    string,
+    { manpower: number; research: number; culture: number }
+  >();
   for (const p of provinces) {
     if (!p.ownerCode) continue;
-    const g = gain.get(p.ownerCode) ?? { manpower: 0, research: 0 };
+    const g =
+      gain.get(p.ownerCode) ?? { manpower: 0, research: 0, culture: 0 };
     g.manpower += p.manpowerProduction;
     g.research += p.researchProduction;
+    g.culture += p.cultureProduction;
     gain.set(p.ownerCode, g);
   }
 
@@ -480,10 +537,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       if (!g) continue;
       f.manpower += g.manpower;
       f.researchPoints += g.research;
+      f.culture += g.culture;
       await db.execute(
-        `UPDATE factions SET manpower = ?, research_points = ?
+        `UPDATE factions SET manpower = ?, research_points = ?, culture = ?
          WHERE save_id = ? AND code = ?`,
-        [f.manpower, f.researchPoints, saveId, f.code],
+        [f.manpower, f.researchPoints, f.culture, saveId, f.code],
       );
     }
     await db.execute('UPDATE saves SET turn = ?, updated_at = ? WHERE id = ?', [

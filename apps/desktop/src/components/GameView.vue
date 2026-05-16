@@ -2,12 +2,14 @@
 import { computed, onMounted, ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Flag from "./Flag.vue";
-import { GRID, CONTINENT_NAMES } from "../game/map-generator";
+import { GRID, CONTINENT_NAMES, hemisphereOf } from "../game/map-generator";
 import { NATIONS, type Nation, flagSeed } from "../game/nations";
 import { ALIGNMENTS, ALIGNMENT_LIST } from "../game/alignments";
-import { resourceInfo } from "../game/resources";
+import { ResourceType } from "../game/enums";
+import { resourceInfo, resourceBoost } from "../game/resources";
 import { FACTION_STATS, TERRITORY_STATS, type FactionState } from "../game/economy";
-import { formatTurnDate } from "../game/turns";
+import { climateInfo, seasonForMonth, SEASONS } from "../game/climate";
+import { formatTurnDate, turnDate } from "../game/turns";
 import {
   loadMap,
   loadFactions,
@@ -37,7 +39,7 @@ const loading = ref(true);
 const err = ref("");
 const busy = ref(false);
 
-const mode = ref<"political" | "resource">("political");
+const mode = ref<"political" | "resource" | "climate">("political");
 const selected = ref<Province | null>(null);
 const hovered = ref<Province | null>(null);
 
@@ -321,6 +323,14 @@ const iconProvinces = computed(() =>
     : [],
 );
 
+// Zonas sísmicas e vulcões aparecem no mapa só no modo Clima.
+const seismicProvinces = computed(() =>
+  mode.value === "climate" ? provinces.value.filter((p) => p.seismic) : [],
+);
+const volcanoProvinces = computed(() =>
+  mode.value === "climate" ? provinces.value.filter((p) => p.volcano) : [],
+);
+
 const selectedOwner = computed(() =>
   nationOf(selected.value?.ownerCode ?? null),
 );
@@ -330,6 +340,42 @@ const selectedOwnerAlignment = computed(() =>
 const selectedResource = computed(() =>
   selected.value ? resourceInfo(selected.value.resource) : null,
 );
+
+// ===== Clima e estações =====
+/** Mês (0–11) do turno atual — base para calcular as estações. */
+const currentMonth = computed(() => turnDate(turn.value).getUTCMonth());
+const seasonNorth = computed(() => SEASONS[seasonForMonth(currentMonth.value, "N")]);
+const seasonSouth = computed(() => SEASONS[seasonForMonth(currentMonth.value, "S")]);
+
+const selectedClimate = computed(() =>
+  selected.value ? climateInfo(selected.value.climate) : null,
+);
+const selectedHemisphere = computed(() =>
+  selected.value ? hemisphereOf(selected.value.y) : null,
+);
+const selectedSeason = computed(() =>
+  selectedHemisphere.value
+    ? SEASONS[seasonForMonth(currentMonth.value, selectedHemisphere.value)]
+    : null,
+);
+
+// Multiplicador de produção do recurso local (clima / continente).
+const selectedBoost = computed(() =>
+  selected.value
+    ? resourceBoost(
+        selected.value.resource,
+        selected.value.climate,
+        selected.value.continent,
+      )
+    : 1,
+);
+const boostReason = computed(() => {
+  const p = selected.value;
+  if (!p) return "";
+  return p.resource === ResourceType.NIOBIO
+    ? "América do Sul"
+    : "clima " + climateInfo(p.climate).label.toLowerCase();
+});
 
 const ownership = computed(() => {
   const counts = new Map<string, number>();
@@ -365,6 +411,7 @@ const panelTitle = computed(() =>
 
 function provinceFill(p: Province): string {
   if (mode.value === "resource") return resourceInfo(p.resource).color;
+  if (mode.value === "climate") return climateInfo(p.climate).color;
   return nationOf(p.ownerCode)?.color ?? NEUTRAL_COLOR;
 }
 </script>
@@ -428,6 +475,33 @@ function provinceFill(p: Province): string {
         style="pointer-events: none"
       >
         {{ resourceInfo(p.resource).icon }}
+      </text>
+      <!-- Zonas sísmicas (anel de fogo) — só no modo Clima -->
+      <rect
+        v-for="p in seismicProvinces"
+        :key="'sz' + p.id"
+        :x="p.x"
+        :y="p.y"
+        width="1.02"
+        height="1.02"
+        fill="none"
+        stroke="#ff7a33"
+        stroke-width="0.1"
+        stroke-dasharray="0.2 0.14"
+        style="pointer-events: none"
+      />
+      <!-- Vulcões — só no modo Clima -->
+      <text
+        v-for="p in volcanoProvinces"
+        :key="'vc' + p.id"
+        :x="p.x + 0.5"
+        :y="p.y + 0.5"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size="0.8"
+        style="pointer-events: none"
+      >
+        🌋
       </text>
       <!-- Contorno da província selecionada -->
       <rect
@@ -523,6 +597,12 @@ function provinceFill(p: Province): string {
           >
             ⛏️ Recursos
           </button>
+          <button
+            :class="{ on: mode === 'climate' }"
+            @click="mode = 'climate'"
+          >
+            🌦️ Clima
+          </button>
         </div>
 
         <div class="spacer"></div>
@@ -580,6 +660,11 @@ function provinceFill(p: Province): string {
         <div class="turn-info">
           <span class="turn-num">Turno {{ turn }}</span>
           <span class="turn-date">{{ currentDate }}</span>
+          <span class="turn-seasons">
+            <span class="hemi">N {{ seasonNorth.icon }} {{ seasonNorth.label }}</span>
+            <span class="dimsep">·</span>
+            <span class="hemi">S {{ seasonSouth.icon }} {{ seasonSouth.label }}</span>
+          </span>
         </div>
         <button class="turn-btn" :disabled="advancing" @click="nextTurn">
           {{ advancing ? "Processando..." : "Próximo turno ▶" }}
@@ -641,17 +726,59 @@ function provinceFill(p: Province): string {
             <span class="ricon">{{ selectedResource.icon }}</span>
             <div class="rinfo">
               <div class="rname">{{ selectedResource.label }}</div>
-              <span
-                class="tier"
-                :class="selectedResource.tier === 'RARO' ? 'rare' : 'common'"
-              >
-                {{ selectedResource.tier }}
-              </span>
+              <div class="rtags">
+                <span
+                  class="tier"
+                  :class="selectedResource.tier === 'RARO' ? 'rare' : 'common'"
+                >
+                  {{ selectedResource.tier }}
+                </span>
+                <span
+                  v-if="selectedBoost !== 1"
+                  class="boost"
+                  :class="selectedBoost > 1 ? 'up' : 'down'"
+                  title="Multiplicador da produção do recurso local"
+                >
+                  ×{{ selectedBoost.toLocaleString("pt-BR") }} ·
+                  {{ boostReason }}
+                </span>
+              </div>
             </div>
           </div>
           <p v-if="selectedResource" class="effect">
             {{ selectedResource.effect }}
           </p>
+
+          <div
+            v-if="selectedClimate"
+            class="climate"
+            :style="{ '--cl': selectedClimate.color }"
+          >
+            <span class="cicon">{{ selectedClimate.icon }}</span>
+            <div class="cinfo">
+              <div class="cname">{{ selectedClimate.label }}</div>
+              <span class="csub">
+                {{
+                  selectedHemisphere === "N"
+                    ? "Hemisfério Norte"
+                    : "Hemisfério Sul"
+                }}
+                <span class="dimsep">·</span>
+                {{ selectedSeason?.icon }} {{ selectedSeason?.label }}
+              </span>
+            </div>
+          </div>
+          <p v-if="selectedClimate" class="effect">
+            {{ selectedClimate.description }}
+          </p>
+          <div v-if="selected.volcano || selected.seismic" class="hazards">
+            <span v-if="selected.volcano" class="hazard volc">
+              🌋 Vulcão
+            </span>
+            <span v-if="selected.seismic" class="hazard quake">
+              ⚠️ Zona sísmica
+            </span>
+          </div>
 
           <div class="prod-head">Produção por turno</div>
           <div class="prod-grid">
@@ -1026,6 +1153,17 @@ function provinceFill(p: Province): string {
   font-weight: 700;
   color: #fff;
 }
+.turn-seasons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 0.72rem;
+  color: #aab2bf;
+}
+.turn-seasons .hemi {
+  font-weight: 600;
+}
 .turn-btn {
   width: 100%;
   padding: 13px;
@@ -1091,6 +1229,8 @@ function provinceFill(p: Province): string {
 .province .sub,
 .province .owner,
 .province .resource,
+.province .climate,
+.province .hazards,
 .province .effect {
   margin-left: 13px;
   margin-right: 13px;
@@ -1170,10 +1310,81 @@ function provinceFill(p: Province): string {
   background: rgba(127, 140, 141, 0.22);
   color: #aab4b8;
 }
+.rtags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+}
+.rtags .tier {
+  margin-top: 0;
+}
+.boost {
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.boost.up {
+  background: rgba(70, 170, 90, 0.2);
+  color: #71c98a;
+}
+.boost.down {
+  background: rgba(205, 95, 75, 0.2);
+  color: #e6917a;
+}
 .effect {
   color: #8a92a0;
   font-size: 0.8rem;
   margin: 9px 13px 14px;
+}
+
+/* Clima do território */
+.climate {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 11px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cl);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.cicon {
+  font-size: 1.7rem;
+}
+.cname {
+  font-weight: 700;
+  color: var(--cl);
+}
+.csub {
+  font-size: 0.76rem;
+  color: #9aa0ac;
+}
+.hazards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+.hazard {
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 4px 9px;
+}
+.hazard.volc {
+  background: rgba(214, 87, 49, 0.18);
+  color: #ef8a5f;
+  border: 1px solid rgba(214, 87, 49, 0.4);
+}
+.hazard.quake {
+  background: rgba(232, 168, 74, 0.16);
+  color: #e8b84a;
+  border: 1px solid rgba(232, 168, 74, 0.38);
 }
 
 /* Produção do território */
@@ -1220,7 +1431,7 @@ function provinceFill(p: Province): string {
   position: absolute;
   right: 14px;
   top: 70px;
-  bottom: 138px;
+  bottom: 156px;
   width: 330px;
   display: flex;
   flex-direction: column;

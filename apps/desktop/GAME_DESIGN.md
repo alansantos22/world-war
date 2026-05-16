@@ -16,10 +16,11 @@ expandir território, gerir economia, fazer diplomacia e vencer as outras
 nações — todas controladas por IA.
 
 Estado atual: o **mapa-múndi** com províncias, nações e direcionamentos
-políticos; cada facção tem os seus **quatro valores**, cada território a sua
-**produção por turno**, e o jogo já avança por **turnos** (1 semana cada),
-em que as facções recebem a produção das suas províncias. IA e diplomacia
-ainda serão implementadas.
+políticos; cada facção tem os seus **valores**, cada território a sua
+**produção por turno** e os seus dados de **clima e geografia** (hemisfério,
+zona de clima, zonas sísmicas, vulcões); o jogo já avança por **turnos**
+(1 semana cada), em que as facções recebem a produção das suas províncias. IA,
+eventos e diplomacia ainda serão implementados.
 
 ---
 
@@ -82,7 +83,7 @@ fica limpo, sem ícones de recurso (nem dos raros).
 
 ### Produção do território
 
-Além do recurso, **cada província produz quatro valores por turno**
+Além do recurso, **cada província produz cinco valores por turno**
 (definidos em [`src/game/economy.ts`](src/game/economy.ts), sorteados na
 geração do mapa):
 
@@ -92,13 +93,16 @@ geração do mapa):
 | Recurso local       | Quanto do recurso da província é produzido.            |
 | Produção            | Produção industrial estilo *Civilization* (futuras tropas/construções). |
 | Pesquisa / turno    | Pontos de pesquisa gerados pela província.             |
+| Cultura / turno     | Cultura gerada pela província.                         |
 
 As **capitais produzem o dobro** de cada valor. Os números são sorteados a
-cada "Novo mapa" e ficam visíveis no painel da província.
+cada "Novo mapa" e ficam visíveis no painel da província. A produção do
+**recurso local** ainda recebe um **bônus de clima** (ver seção 10).
 
-A cada turno (ver seção 9), o **manpower** e a **pesquisa** produzidos são
-somados aos valores da facção dona. "Recurso local" e "produção industrial"
-ainda **não são acumulados** — ficam reservados para mecânicas futuras
+A cada turno (ver seção 9), o **manpower**, a **pesquisa** e a **cultura**
+produzidos são somados aos valores da facção dona. "Recurso local" e
+"produção industrial" ainda **não são acumulados** — ficam reservados para
+mecânicas futuras
 (efeito dos recursos, construção de tropas/edifícios).
 
 ---
@@ -130,7 +134,7 @@ Todo o resto do mundo começa **neutro**.
 
 ### Valores da facção
 
-Toda facção (as 13 nações fixas **e** a nação personalizada) acumula **quatro
+Toda facção (as 13 nações fixas **e** a nação personalizada) acumula **cinco
 valores**, definidos em [`src/game/economy.ts`](src/game/economy.ts) e
 persistidos na tabela `factions`:
 
@@ -140,15 +144,16 @@ persistidos na tabela `factions`:
 | Influência          | Influência política.                               |
 | Manpower            | População mobilizável disponível.                  |
 | Pontos de pesquisa  | Pontos de pesquisa acumulados.                     |
+| Cultura             | Cultura acumulada.                                 |
 
 Toda facção começa a partida com os **mesmos valores iniciais**
 (`STARTING_FACTION`): 1.000 de dinheiro, 100 de influência, 10.000 de
-manpower e 0 de pesquisa. Os valores da facção do jogador ficam visíveis na
-**barra superior** da HUD (ver seção 8).
+manpower, 0 de pesquisa e 0 de cultura. Os valores da facção do jogador ficam
+visíveis na **barra superior** da HUD (ver seção 8).
 
 A cada turno a facção recebe a produção das suas províncias (ver seção 9):
-**manpower** e **pesquisa** crescem. Dinheiro e influência ainda **não têm
-fonte de produção** — ficam parados até definirmos de onde vêm.
+**manpower**, **pesquisa** e **cultura** crescem. Dinheiro e influência ainda
+**não têm fonte de produção** — ficam parados até definirmos de onde vêm.
 
 ### Bandeiras
 
@@ -279,6 +284,10 @@ Cada província pertence a uma partida (`save_id`).
 | `resource_prod` | INTEGER | Recurso local produzido por turno.      |
 | `production`    | INTEGER | Produção industrial por turno.          |
 | `research_prod` | INTEGER | Pontos de pesquisa produzidos por turno.|
+| `culture_prod`  | INTEGER | Cultura produzida por turno.            |
+| `climate`       | TEXT    | Zona de clima (`ClimateZone`).          |
+| `seismic`       | INTEGER | 1 se a província fica numa zona sísmica.|
+| `volcano`       | INTEGER | 1 se há um vulcão na província.         |
 
 ### Tabela `factions`
 
@@ -294,6 +303,7 @@ personalizada).
 | `influence`       | INTEGER | Influência.                            |
 | `manpower`        | INTEGER | Manpower.                              |
 | `research_points` | INTEGER | Pontos de pesquisa.                    |
+| `culture`         | INTEGER | Cultura.                               |
 
 Criar um novo jogo gera o mapa, grava as províncias e cria as facções daquela
 partida; carregar uma partida lê províncias e facções do seu `save_id`. "Novo
@@ -314,24 +324,27 @@ deixando o mapa livre.
 - **Janela** — abre **maximizada**; o botão **Tela cheia** da barra lateral
   alterna a **tela cheia** de verdade.
 - **Barra superior** (sempre visível) — à esquerda, a **bandeira e o nome** da
-  nação do jogador seguidos dos seus **quatro valores** (dinheiro, influência,
-  manpower e pesquisa — ver seção 3); depois a alternância de visão do mapa
-  (Político / Recursos); à direita, a província sob o cursor e o nome da
-  partida. Não traz o nome do jogo (já aparece no menu inicial).
+  nação do jogador seguidos dos seus **valores** (dinheiro, influência,
+  manpower, pesquisa e cultura — ver seção 3); depois a alternância de visão do
+  mapa (**Político** / **Recursos** / **Clima**); à direita, a província sob o
+  cursor e o nome da partida. Não traz o nome do jogo (já aparece no menu
+  inicial).
 - **Barra lateral** (canto superior esquerdo) — uma lista vertical de botões
   arredondados, **só com ícones**, para as ações do jogo: **Nações** (🏴) e
   **Direcionamentos** (🎖️), que abrem os painéis, e **Novo mapa** (↻),
   **Salvar jogo** (💾), **Menu** (⏏) e **Tela cheia** (⛶). O texto de cada
   ação aparece como dica ao passar o mouse.
 - **Painel da província** — aparece ao **clicar numa província**; mostra dono,
-  direcionamento, recurso e a **produção por turno** (manpower, recurso local,
-  produção e pesquisa). Fecha no `✕` ou ao clicar no oceano.
+  direcionamento, recurso, **clima** (zona, hemisfério, estação, avisos de
+  zona sísmica/vulcão) e a **produção por turno** (manpower, recurso local,
+  produção, pesquisa e cultura). Fecha no `✕` ou ao clicar no oceano.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
   territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
   fica aberto por vez; o botão acende quando ativo.
 - **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
-  **turno atual** e a **data**, e traz o botão grande **Próximo turno** que
-  avança o tempo (ver seção 9).
+  **turno atual**, a **data** e a **estação** de cada hemisfério (ver seção
+  10), e traz o botão grande **Próximo turno** que avança o tempo (ver seção
+  9).
 
 - **Navegação do mapa** — a roda do mouse dá **zoom** (centrado no cursor) e
   **arrastar** move o mapa. Não há botões de zoom: a navegação é toda pelo
@@ -361,6 +374,7 @@ Cada facção recebe a produção das suas províncias somada aos seus valores:
 
 - **Manpower** += soma do manpower produzido pelas suas províncias.
 - **Pesquisa** += soma da pesquisa produzida pelas suas províncias.
+- **Cultura** += soma da cultura produzida pelas suas províncias.
 
 As **capitais já produzem o dobro** (regra da geração do mapa — seção 2),
 então esse bônus entra naturalmente na soma.
@@ -374,7 +388,73 @@ modificada (`updated_at`).
 
 ---
 
-## 10. Estrutura do código
+## 10. Clima e geografia
+
+Cada província carrega dados de **clima e geografia**, definidos em
+[`src/game/climate.ts`](src/game/climate.ts) e sorteados na geração do mapa.
+Por enquanto é só o **mapa de dados** — os eventos e os buffs/debuffs que vão
+usá-lo ainda serão implementados.
+
+### Hemisférios e estações
+
+A linha do **equador** divide o mundo: províncias acima dela ficam no
+**hemisfério Norte**, abaixo no **hemisfério Sul** (`EQUATOR_ROW` em
+[`map-generator.ts`](src/game/map-generator.ts)).
+
+As **estações do ano** seguem o calendário dos turnos (seção 9) e são
+**opostas entre os hemisférios** — quando é verão no Norte, é inverno no Sul.
+As quatro estações (Primavera, Verão, Outono, Inverno) aparecem na caixa de
+turno para os dois hemisférios.
+
+### Zonas de clima
+
+Cada província tem uma das **4 zonas de clima**, definida pela latitude (do
+equador rumo aos polos):
+
+| Zona       | Onde aparece                                  |
+|------------|-----------------------------------------------|
+| Tropical   | Perto do equador.                             |
+| Desértico  | Faixas subtropicais.                          |
+| Ameno      | Latitudes médias (clima temperado).           |
+| Gelado     | Regiões polares.                              |
+
+Uma leve variação aleatória evita faixas perfeitamente retas. O modo de visão
+**Clima** pinta o mapa por zona.
+
+### Bônus de clima nos recursos
+
+O clima multiplica a **produção do recurso local** de uma província
+(`resourceBoost` em [`src/game/resources.ts`](src/game/resources.ts)):
+
+| Recurso          | Tropical | Ameno | Desértico | Gelado |
+|------------------|----------|-------|-----------|--------|
+| Terras Agrícolas | 1,5×     | 2×    | 0,5×      | 0,75×  |
+| Madeira          | 2×       | 1×    | 0,5×      | 0,75×  |
+| Petróleo         | 1×       | 1×    | 1,75×     | 1,5×   |
+
+O **Nióbio** é um caso à parte: rende **2×** quando está na **América do Sul**
+(continente `S`), independentemente do clima.
+
+Recursos/combinações sem entrada usam **1×** (sem bônus nem penalidade). O
+multiplicador já entra na produção sorteada na geração do mapa e aparece como
+uma etiqueta no painel da província.
+
+### Placas tectônicas
+
+- **Zonas sísmicas** — formam um "anel de fogo" em volta do Pacífico: a costa
+  oeste das Américas, a costa leste da Ásia e toda a Oceania.
+- **Vulcões** — espalhados por algumas das províncias sísmicas (~12%).
+
+No modo **Clima**, as zonas sísmicas aparecem com um contorno laranja e os
+vulcões com o ícone 🌋; o painel da província mostra os dois como avisos.
+
+> **Planejado:** usar esse mapa de placas e clima como base para um sistema de
+> **eventos** (terremotos, erupções, secas, ondas de frio) e de **buffs e
+> debuffs** sazonais.
+
+---
+
+## 11. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -389,8 +469,9 @@ apps/desktop/src/
 └── game/
     ├── enums.ts          ResourceType
     ├── flags.ts          geração do padrão das bandeiras
-    ├── resources.ts      catálogo de recursos
+    ├── resources.ts      catálogo de recursos e bônus de clima
     ├── economy.ts        valores da facção e produção do território
+    ├── climate.ts        zonas de clima, hemisférios e estações
     ├── turns.ts          calendário dos turnos (data a partir do turno)
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
@@ -401,16 +482,18 @@ apps/desktop/src/
 
 ---
 
-## 11. Roteiro (próximos passos)
+## 12. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
 2. ~~**Turnos** — botão "Próximo turno" que avança o tempo.~~
    **Implementado** (seção 9): turnos semanais a partir de 01/01/1980.
-3. **Economia** — *parcial*: a cada turno as facções já recebem **manpower** e
-   **pesquisa** das suas províncias (seção 9). Falta dar uma fonte de produção
-   ao **dinheiro** e à **influência**, e usar "recurso local" e "produção
-   industrial" (efeito dos recursos, construção de tropas/edifícios).
-4. **Expansão** — conquistar províncias neutras e vizinhas.
-5. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
-6. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).
+3. **Economia** — *parcial*: a cada turno as facções já recebem **manpower**,
+   **pesquisa** e **cultura** das suas províncias (seção 9). Falta dar uma
+   fonte de produção ao **dinheiro** e à **influência**, e usar "recurso local"
+   e "produção industrial" (efeito dos recursos, construção de tropas/edifícios).
+4. **Eventos** — terremotos, erupções e eventos sazonais sobre o mapa de clima
+   e placas tectônicas (seção 10), com **buffs e debuffs**.
+5. **Expansão** — conquistar províncias neutras e vizinhas.
+6. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno.
+7. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4).

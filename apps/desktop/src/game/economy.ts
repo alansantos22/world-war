@@ -8,7 +8,7 @@
 
 // ===== Facção =====
 
-/** Os quatro valores que toda facção (nação) acumula. */
+/** Os valores que toda facção (nação) acumula. */
 export interface FactionState {
   /** Código da nação dona (igual a `Nation.code`). */
   code: string;
@@ -20,6 +20,8 @@ export interface FactionState {
   manpower: number;
   /** Pontos de pesquisa acumulados. */
   researchPoints: number;
+  /** Cultura acumulada. */
+  culture: number;
 }
 
 /** Valores iniciais de toda facção ao começar uma partida. */
@@ -28,6 +30,7 @@ export const STARTING_FACTION: Omit<FactionState, 'code'> = {
   influence: 100,
   manpower: 10000,
   researchPoints: 0,
+  culture: 0,
 };
 
 /** Catálogo de exibição de um valor (facção ou território) na HUD. */
@@ -37,12 +40,13 @@ export interface StatInfo {
   color: string;
 }
 
-/** Os quatro valores de uma facção, na ordem em que aparecem na HUD. */
+/** Os valores de uma facção, na ordem em que aparecem na HUD. */
 export const FACTION_STATS: (StatInfo & { key: keyof Omit<FactionState, 'code'> })[] = [
   { key: 'money', label: 'Dinheiro', icon: '💰', color: '#e8c14a' },
   { key: 'influence', label: 'Influência', icon: '🎖️', color: '#5b9fd1' },
   { key: 'manpower', label: 'Manpower', icon: '🪖', color: '#cf6b4a' },
   { key: 'researchPoints', label: 'Pesquisa', icon: '🔬', color: '#7fb86b' },
+  { key: 'culture', label: 'Cultura', icon: '🎭', color: '#b884d0' },
 ];
 
 // ===== Território =====
@@ -57,12 +61,15 @@ export interface TerritoryProduction {
   production: number;
   /** Pontos de pesquisa gerados por turno. */
   researchProduction: number;
+  /** Cultura gerada por turno. */
+  cultureProduction: number;
 }
 
-/** Os quatro valores de um território, na ordem em que aparecem na HUD. */
+/** Os valores de um território, na ordem em que aparecem na HUD. */
 export const TERRITORY_STATS: (StatInfo & { key: keyof TerritoryProduction })[] = [
   { key: 'manpowerProduction', label: 'Manpower / turno', icon: '🪖', color: '#cf6b4a' },
   { key: 'resourceProduction', label: 'Recurso local', icon: '📦', color: '#c9a24a' },
   { key: 'production', label: 'Produção', icon: '🏭', color: '#8aa0b8' },
   { key: 'researchProduction', label: 'Pesquisa / turno', icon: '🔬', color: '#7fb86b' },
+  { key: 'cultureProduction', label: 'Cultura / turno', icon: '🎭', color: '#b884d0' },
 ];

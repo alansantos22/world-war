@@ -1,5 +1,7 @@
 import { ResourceType } from './enums';
 import { TerritoryProduction } from './economy';
+import { ClimateZone, Hemisphere } from './climate';
+import { resourceBoost } from './resources';
 
 /**
  * Gerador procedural do mapa-múndi (vetorial estilizado).
@@ -11,6 +13,17 @@ import { TerritoryProduction } from './economy';
  */
 
 export const GRID = { cols: 50, rows: 24 };
+
+/**
+ * Linha do equador. Províncias com `y < EQUATOR_ROW` ficam no hemisfério
+ * Norte; o resto, no hemisfério Sul.
+ */
+export const EQUATOR_ROW = GRID.rows / 2;
+
+/** Hemisfério de uma célula, a partir da sua linha. */
+export function hemisphereOf(y: number): Hemisphere {
+  return y < EQUATOR_ROW ? 'N' : 'S';
+}
 
 export interface Cell {
   x: number;
@@ -26,6 +39,12 @@ export interface GeneratedProvince extends TerritoryProduction {
   resource: ResourceType;
   ownerCode: string | null;
   isCapital: boolean;
+  /** Zona de clima da província. */
+  climate: ClimateZone;
+  /** `true` se a província fica numa zona sísmica (anel de fogo). */
+  seismic: boolean;
+  /** `true` se há um vulcão na província. */
+  volcano: boolean;
 }
 
 export interface GeneratedMap {
@@ -121,7 +140,50 @@ function rollProduction(isCapital: boolean): TerritoryProduction {
     resourceProduction: randInt(4, 16) * m,
     production: randInt(5, 22) * m,
     researchProduction: randInt(1, 7) * m,
+    cultureProduction: randInt(1, 6) * m,
   };
+}
+
+/**
+ * Zona de clima de uma célula, definida pela latitude: tropical perto do
+ * equador, depois desértico, ameno e gelado em direção aos polos. Uma leve
+ * variação aleatória evita faixas perfeitamente retas.
+ */
+function climateOf(y: number): ClimateZone {
+  const d = Math.abs(y + 0.5 - EQUATOR_ROW) + (Math.random() * 2 - 1);
+  if (d < 2.5) return ClimateZone.TROPICAL;
+  if (d < 5.5) return ClimateZone.DESERTICO;
+  if (d < 8.5) return ClimateZone.AMENO;
+  return ClimateZone.GELADO;
+}
+
+/**
+ * Marca as zonas sísmicas — o "anel de fogo" em volta do Pacífico: a costa
+ * oeste das Américas, a costa leste da Ásia e toda a Oceania.
+ */
+function markSeismic(provinces: GeneratedProvince[]): void {
+  const byKey = new Map(provinces.map((p) => [`${p.x},${p.y}`, p]));
+  for (const [continent, rows] of Object.entries(LAND)) {
+    for (const [row, c0, c1] of rows) {
+      for (let x = c0; x <= c1; x++) {
+        const p = byKey.get(`${x},${row}`);
+        if (!p) continue;
+        if (continent === 'O') p.seismic = true; // toda a Oceania
+        else if (continent === 'N' || continent === 'S') {
+          if (x <= c0 + 1) p.seismic = true; // costa oeste das Américas
+        } else if (continent === 'I') {
+          if (x >= c1 - 2) p.seismic = true; // costa leste da Ásia
+        }
+      }
+    }
+  }
+}
+
+/** Espalha vulcões por algumas das províncias sísmicas. */
+function placeVolcanoes(provinces: GeneratedProvince[]): void {
+  const seismic = shuffle(provinces.filter((p) => p.seismic));
+  const count = Math.min(seismic.length, Math.max(6, Math.round(seismic.length * 0.12)));
+  for (let i = 0; i < count; i++) seismic[i].volcano = true;
 }
 function shuffle<T>(arr: T[]): T[] {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -175,10 +237,14 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
         resource: null as any,
         ownerCode: null,
         isCapital: false,
+        climate: climateOf(cell.y),
+        seismic: false,
+        volcano: false,
         manpowerProduction: 0,
         resourceProduction: 0,
         production: 0,
         researchProduction: 0,
+        cultureProduction: 0,
       });
     }
   }
@@ -264,7 +330,17 @@ export function generateMap(seeds: CapitalSeed[]): GeneratedMap {
   }
 
   // 5. Sorteia a produção por turno de cada província (capitais já marcadas).
-  for (const p of provinces) Object.assign(p, rollProduction(p.isCapital));
+  //    A produção do recurso local ainda leva o multiplicador de clima.
+  for (const p of provinces) {
+    Object.assign(p, rollProduction(p.isCapital));
+    p.resourceProduction = Math.round(
+      p.resourceProduction * resourceBoost(p.resource, p.climate, p.continent),
+    );
+  }
+
+  // 6. Zonas sísmicas (anel de fogo) e vulcões.
+  markSeismic(provinces);
+  placeVolcanoes(provinces);
 
   return { cols: GRID.cols, rows: GRID.rows, provinces };
 }
