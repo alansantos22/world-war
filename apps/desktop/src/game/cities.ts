@@ -149,9 +149,9 @@ export function cityPopCap(city: { isCapital: boolean }): number {
 
 // ===== Produção da cidade =====
 
-/** Produção-base de uma cidade (capital 40, cidade comum 25). */
-export const CAPITAL_BASE_PRODUCTION = 40;
-export const CITY_BASE_PRODUCTION = 25;
+/** Produção-base de uma cidade (capital 20, cidade comum 10). */
+export const CAPITAL_BASE_PRODUCTION = 20;
+export const CITY_BASE_PRODUCTION = 10;
 /** População que rende +1 de produção (mão de obra). */
 export const POP_PER_PRODUCTION = 25_000;
 /** Cultura-base gerada por turno (capital 5, cidade comum 2). */

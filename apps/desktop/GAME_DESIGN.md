@@ -97,7 +97,7 @@ cidade tem valores-base e cresce com a população:
 
 | Valor          | Capital | Cidade | Cresce com |
 |----------------|---------|--------|------------|
-| Produção       | 40      | 25     | +1 a cada 25 mil de população; zonas de fábrica |
+| Produção       | 20      | 10     | +1 a cada 25 mil de população; zonas de fábrica |
 | Cultura/turno  | 5       | 2      | museu, teatro, rádio, TV |
 | Recurso local  | 2 (1 raro) | 1 (0 raro) | — extrai o recurso do próprio tile |
 
@@ -530,8 +530,10 @@ deixando o mapa livre.
   da província; só abre em **tiles de cidade**. O nome no topo é **editável**
   (renomeia a cidade). Tem três abas (estilo *Civilization*): **Cidade**
   (população, comida, manpower, influência, produção, cultura, pesquisa,
-  felicidade), **Produção** (filas de tropas/colonos e de construção) e
-  **Inventário** (tropas guardadas) — ver seção 12.
+  felicidade, o **Armazém da cidade** — estoque de recursos — e os **Recursos
+  da cidade** — o que ela coleta por turno), **Produção** (filas de
+  tropas/colonos e de construção) e **Inventário** (tropas guardadas) — ver
+  seção 12.
 - **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
   **turno atual**, a **data** e a **estação** de cada hemisfério (ver seção
   10), e traz o botão grande **Próximo turno** que avança o tempo (ver seção

@@ -82,6 +82,7 @@ import {
   cityFoodConsumption,
   cityProduction,
   cityBaseCulture,
+  cityResourceYield,
   INDEPENDENT_CITY_RESEARCH,
   COLONO_COST,
   MIN_CITY_DISTANCE,
@@ -103,6 +104,8 @@ import {
   isSectorForbidden,
   isCityBuildable,
   resourceCapacity,
+  mineOutput,
+  PASTURE_PRODUCT_OUTPUT,
   farmFood,
   pastureFood,
   isMineable,
@@ -1243,6 +1246,41 @@ const selectedCityConstructions = computed<Construction[]>(() =>
           c.cityY === selectedCity.value!.y,
       )
     : [],
+);
+
+/**
+ * Recursos coletados por turno pela cidade selecionada — espelha a coleta de
+ * `advanceTurn` (tile da cidade + minas, pastos, madeireiras e oleodutos). Só
+ * para exibição; o valor autoritativo é recalculado em `world.ts`.
+ */
+const selectedCityResourceProd = computed<{ resource: string; amount: number }[]>(
+  () => {
+    const city = selectedCity.value;
+    if (!city) return [];
+    const map = new Map<string, number>();
+    const add = (res: string, amt: number) =>
+      map.set(res, (map.get(res) ?? 0) + amt);
+    // A cidade extrai o recurso local do seu próprio tile.
+    const cityProv = provinceByTile.value.get(`${city.x},${city.y}`);
+    if (cityProv && cityProv.resource !== ResourceType.TERRAS_AGRICOLAS) {
+      const rare = resourceInfo(cityProv.resource).tier === "RARO";
+      const y = cityResourceYield(city.isCapital, rare);
+      if (y > 0) add(cityProv.resource, y);
+    }
+    for (const con of selectedCityConstructions.value) {
+      const def = CONSTRUCTIONS[con.kind];
+      if (con.kind === "MINA") {
+        const prov = provinceByTile.value.get(`${con.x},${con.y}`);
+        if (prov) add(prov.resource, mineOutput(prov.resource));
+      } else if (con.kind === "PASTO") {
+        if (con.variant === "GADO") add("COURO", PASTURE_PRODUCT_OUTPUT);
+        else if (con.variant === "OVELHA") add("LA", PASTURE_PRODUCT_OUTPUT);
+      } else if (def.collects) {
+        add(def.collects.resource, def.collects.amount);
+      }
+    }
+    return [...map].map(([resource, amount]) => ({ resource, amount }));
+  },
 );
 
 /** Produção de comida da cidade selecionada (base + fazendas + pastos). */
@@ -3089,13 +3127,13 @@ function provinceFill(p: Province): string {
               </div>
               <p class="ci-note">{{ cityFoodBalanceNote }}</p>
 
-              <!-- Inventário de recursos da cidade -->
+              <!-- Armazém de recursos da cidade (estoque) -->
               <div class="ci-label">
-                <span>Recursos da cidade</span>
+                <span>Armazém da cidade</span>
                 <span class="squad-count">{{ cityResourcesHere.length }}</span>
               </div>
               <p v-if="cityResourcesHere.length === 0" class="squad-empty">
-                Nenhum recurso — minas e pastos enchem o inventário.
+                Vazio — o tile da cidade, minas e pastos enchem o armazém.
               </p>
               <div v-else class="ci-resources">
                 <span
@@ -3107,6 +3145,30 @@ function provinceFill(p: Province): string {
                   {{ resourceLabel(r.resource).icon }} {{ r.amount }}/{{
                     resourceCapacity(r.resource, armazemCount(selectedCity))
                   }}
+                </span>
+              </div>
+
+              <!-- Recursos coletados por turno -->
+              <div class="ci-label">
+                <span>Recursos da cidade</span>
+                <span class="squad-count">
+                  {{ selectedCityResourceProd.length }}
+                </span>
+              </div>
+              <p
+                v-if="selectedCityResourceProd.length === 0"
+                class="squad-empty"
+              >
+                A cidade não coleta nenhum recurso por turno.
+              </p>
+              <div v-else class="ci-resources">
+                <span
+                  v-for="r in selectedCityResourceProd"
+                  :key="r.resource"
+                  class="ci-res"
+                  :title="resourceLabel(r.resource).label"
+                >
+                  {{ resourceLabel(r.resource).icon }} +{{ r.amount }}/turno
                 </span>
               </div>
             </template>
