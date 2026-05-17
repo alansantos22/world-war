@@ -1254,6 +1254,11 @@ duas cidades). O jogador vê o custo **antes** de mandar construir. O
 da cidade (uma ordem por turno, como recrutamento e construção). Cancelar uma
 ordem **devolve o dinheiro** pago.
 
+O traçado e o custo são **recalculados ao enfileirar** a obra, a partir do
+estado do jogo — a interface não envia caminho nem preço. Assim não há como
+enfileirar uma via mais barata, num caminho que não é seu ou uma ferrovia sem
+estrada.
+
 ### Movimento das tropas
 
 Cada esquadrão tem `move_allowance` movimentos por turno (1 por padrão) e

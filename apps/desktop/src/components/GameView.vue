@@ -137,8 +137,7 @@ import {
   type TaxLevel,
 } from "../game/economy";
 import {
-  findRoadPath,
-  roadTileCost,
+  planRoad,
   loadRoadOrders,
   queueRoad,
   cancelRoad,
@@ -1000,16 +999,6 @@ const roadOrdersHere = computed<RoadOrder[]>(() =>
     : [],
 );
 
-/** Conjunto `"x,y"` dos tiles possuídos pela facção do jogador. */
-const playerOwnedTiles = computed<Set<string>>(() => {
-  const code = game.value?.playerCode;
-  const set = new Set<string>();
-  for (const p of provinces.value) {
-    if (p.ownerCode === code) set.add(`${p.x},${p.y}`);
-  }
-  return set;
-});
-
 /** Tipo de via (`ROAD`/`RAIL`) de cada tile que tem via. */
 const roadByTile = computed<Map<string, RoadKind>>(() => {
   const m = new Map<string, RoadKind>();
@@ -1084,44 +1073,38 @@ const roadTargets = computed<RoadTarget[]>(() => {
   const from = selectedCity.value;
   const code = game.value?.playerCode;
   if (!from || !code) return [];
-  const owned = playerOwnedTiles.value;
-  const roads = roadByTile.value;
   const out: RoadTarget[] = [];
   for (const c of cities.value) {
     if (c.ownerCode !== code || (c.x === from.x && c.y === from.y)) continue;
-    const start = { x: from.x, y: from.y };
-    const goal = { x: c.x, y: c.y };
-
-    // Estrada: caminho mais curto por tiles próprios; cobra só os tiles
-    // que ainda não têm via.
-    const full = findRoadPath(start, goal, owned);
-    const inter = full ? full.slice(1, -1) : null;
-    const roadPath = inter
-      ? inter.filter((t) => !roads.has(`${t.x},${t.y}`))
-      : null;
-    const rt = roadTileCost('ROAD');
-    const roadN = roadPath ? roadPath.length : 0;
-
-    // Ferrovia: só vale como upgrade de uma via já existente. A* sobre os
-    // tiles de via (+ as cidades) acha o traçado da ligação atual.
-    const viaSet = new Set(roadByTile.value.keys());
-    viaSet.add(`${from.x},${from.y}`);
-    viaSet.add(`${c.x},${c.y}`);
-    const viaPath = findRoadPath(start, goal, viaSet);
-    const viaInter = viaPath ? viaPath.slice(1, -1) : null;
-    const railPath = viaInter
-      ? viaInter.filter((t) => roads.get(`${t.x},${t.y}`) !== 'RAIL')
-      : null;
-    const railT = roadTileCost('RAIL');
-    const railN = railPath ? railPath.length : 0;
-
+    // `planRoad` é a mesma função autoritativa usada por `queueRoad` — o que
+    // a aba mostra é exatamente o que será cobrado e construído.
+    const road = planRoad(
+      provinces.value,
+      cities.value,
+      code,
+      from.x,
+      from.y,
+      c.x,
+      c.y,
+      "ROAD",
+    );
+    const rail = planRoad(
+      provinces.value,
+      cities.value,
+      code,
+      from.x,
+      from.y,
+      c.x,
+      c.y,
+      "RAIL",
+    );
     out.push({
       city: c,
-      roadPath,
-      roadCost: { prod: rt.prod * roadN, money: rt.money * roadN },
-      railPath,
-      railCost: { prod: railT.prod * railN, money: railT.money * railN },
-      connectedByRoad: !!viaPath,
+      roadPath: road ? road.path : null,
+      roadCost: { prod: road?.prodCost ?? 0, money: road?.moneyCost ?? 0 },
+      railPath: rail ? rail.path : null,
+      railCost: { prod: rail?.prodCost ?? 0, money: rail?.moneyCost ?? 0 },
+      connectedByRoad: !!rail,
     });
   }
   return out.sort((a, b) =>
@@ -1411,6 +1394,8 @@ async function doQueueRoad(target: RoadTarget, kind: RoadKind) {
   busySquad.value = true;
   err.value = "";
   try {
+    // `queueRoad` recalcula traçado e custo no jogo — o `path`/custo da aba
+    // são só para exibir.
     await queueRoad(
       props.saveId,
       code,
@@ -1419,7 +1404,6 @@ async function doQueueRoad(target: RoadTarget, kind: RoadKind) {
       target.city.x,
       target.city.y,
       kind,
-      path,
     );
     roadOrders.value = await loadRoadOrders(props.saveId);
     factions.value = await loadFactions(props.saveId);

@@ -168,6 +168,103 @@ export function connectedCities(
   return connected;
 }
 
+// ===== Planejamento (traçado + custo) =====
+
+/** Um tile, para o cálculo do traçado — só o que `planRoad` precisa saber. */
+interface PlanTile {
+  x: number;
+  y: number;
+  ownerCode: string | null;
+  road: string | null;
+}
+
+/** Uma cidade, para o cálculo do traçado. */
+interface PlanCity {
+  x: number;
+  y: number;
+  ownerCode: string;
+}
+
+/** Traçado e custo de uma ligação por via. */
+export interface RoadPlan {
+  /** Tiles que receberão a via (sem as cidades das pontas). */
+  path: Cell[];
+  prodCost: number;
+  moneyCost: number;
+}
+
+/**
+ * Calcula o traçado e o custo de ligar duas cidades da facção `ownerCode` por
+ * uma via do tipo `kind`. Todo o cálculo é **autoritativo** — feito sobre os
+ * dados do jogo, sem confiar em nada vindo da interface — para impedir
+ * trapaça. Devolve `null` quando a ligação é impossível: ponta que não é uma
+ * cidade da facção, sem caminho por tiles próprios ou — para a ferrovia —
+ * sem uma estrada já ligando as duas cidades.
+ *
+ * O `path` pode vir **vazio** mesmo com `null` não devolvido: significa que a
+ * ligação já existe (toda a estrada/ferrovia já está no lugar).
+ */
+export function planRoad(
+  provinces: PlanTile[],
+  cities: PlanCity[],
+  ownerCode: string,
+  cityX: number,
+  cityY: number,
+  targetX: number,
+  targetY: number,
+  kind: RoadKind,
+): RoadPlan | null {
+  // As duas pontas têm de ser cidades desta facção, e distintas.
+  if (cityX === targetX && cityY === targetY) return null;
+  const isOwnCity = (x: number, y: number): boolean =>
+    cities.some((c) => c.x === x && c.y === y && c.ownerCode === ownerCode);
+  if (!isOwnCity(cityX, cityY) || !isOwnCity(targetX, targetY)) return null;
+
+  const owned = new Set<string>();
+  const roadOf = new Map<string, string>();
+  for (const p of provinces) {
+    if (p.ownerCode === ownerCode) owned.add(key(p.x, p.y));
+    if (p.road) roadOf.set(key(p.x, p.y), p.road);
+  }
+
+  const start = { x: cityX, y: cityY };
+  const goal = { x: targetX, y: targetY };
+
+  if (kind === 'RAIL') {
+    // Ferrovia é upgrade: exige uma via já ligando as duas cidades. O traçado
+    // segue a via existente (estrada/ferrovia) mais as cidades das pontas.
+    const viaSet = new Set(roadOf.keys());
+    viaSet.add(key(cityX, cityY));
+    viaSet.add(key(targetX, targetY));
+    const via = findRoadPath(start, goal, viaSet);
+    if (!via) return null;
+    // Sobe a ferrovia só nos tiles próprios que ainda não são ferrovia.
+    const path = via
+      .slice(1, -1)
+      .filter(
+        (t) =>
+          owned.has(key(t.x, t.y)) && roadOf.get(key(t.x, t.y)) !== 'RAIL',
+      );
+    const cost = roadTileCost('RAIL');
+    return {
+      path,
+      prodCost: cost.prod * path.length,
+      moneyCost: cost.money * path.length,
+    };
+  }
+
+  // Estrada: caminho mais curto por tiles próprios; cobra só os tiles sem via.
+  const full = findRoadPath(start, goal, owned);
+  if (!full) return null;
+  const path = full.slice(1, -1).filter((t) => !roadOf.has(key(t.x, t.y)));
+  const cost = roadTileCost('ROAD');
+  return {
+    path,
+    prodCost: cost.prod * path.length,
+    moneyCost: cost.money * path.length,
+  };
+}
+
 // ===== Fila de estradas =====
 
 /** Uma ordem na fila de estradas de uma cidade. */
@@ -239,8 +336,12 @@ export async function loadRoadOrders(saveId: number): Promise<RoadOrder[]> {
 
 /**
  * Enfileira a construção de uma estrada/ferrovia. Cobra o **dinheiro** na hora;
- * a **produção** é gasta turno a turno. `path` são os tiles que receberão a via
- * (já sem as cidades das pontas) — o custo é `nº de tiles × custo por tile`.
+ * a **produção** é gasta turno a turno.
+ *
+ * O traçado e o custo são **recalculados aqui** (`planRoad`) a partir dos
+ * dados do jogo — a interface não passa caminho nem custo. Assim não há como
+ * trapacear enfileirando uma via mais barata, num caminho inválido ou uma
+ * ferrovia sem estrada.
  */
 export async function queueRoad(
   saveId: number,
@@ -250,29 +351,57 @@ export async function queueRoad(
   targetX: number,
   targetY: number,
   kind: RoadKind,
-  path: Cell[],
 ): Promise<void> {
-  if (path.length === 0) {
-    throw new Error('Sem caminho de tiles próprios para ligar as cidades.');
-  }
   const db = await getDb();
-  const tile = roadTileCost(kind);
-  const prodCost = tile.prod * path.length;
-  const moneyCost = tile.money * path.length;
+
+  // Recarrega províncias e cidades do banco — nada do cliente é confiável.
+  const provinces = await db.select<PlanTile[]>(
+    'SELECT x, y, owner_code AS ownerCode, road FROM provinces WHERE save_id = ?',
+    [saveId],
+  );
+  const cities = await db.select<PlanCity[]>(
+    'SELECT x, y, owner_code AS ownerCode FROM cities WHERE save_id = ?',
+    [saveId],
+  );
+
+  const plan = planRoad(
+    provinces,
+    cities,
+    ownerCode,
+    cityX,
+    cityY,
+    targetX,
+    targetY,
+    kind,
+  );
+  if (!plan) {
+    throw new Error(
+      kind === 'RAIL'
+        ? 'Não há uma estrada ligando estas cidades para virar ferrovia.'
+        : 'Sem caminho de tiles próprios para ligar as cidades.',
+    );
+  }
+  if (plan.path.length === 0) {
+    throw new Error(
+      kind === 'RAIL'
+        ? 'Estas cidades já estão ligadas por ferrovia.'
+        : 'Estas cidades já estão ligadas por estrada.',
+    );
+  }
 
   const rows = await db.select<{ money: number }[]>(
     'SELECT money FROM factions WHERE save_id = ? AND code = ?',
     [saveId, ownerCode],
   );
-  if (!rows[0] || rows[0].money < moneyCost) {
-    throw new Error(`Dinheiro insuficiente (${moneyCost}).`);
+  if (!rows[0] || rows[0].money < plan.moneyCost) {
+    throw new Error(`Dinheiro insuficiente (${plan.moneyCost}).`);
   }
 
   await db.execute('BEGIN');
   try {
     await db.execute(
       'UPDATE factions SET money = money - ? WHERE save_id = ? AND code = ?',
-      [moneyCost, saveId, ownerCode],
+      [plan.moneyCost, saveId, ownerCode],
     );
     await db.execute(
       `INSERT INTO road_orders
@@ -287,9 +416,9 @@ export async function queueRoad(
         kind,
         targetX,
         targetY,
-        JSON.stringify(path),
-        prodCost,
-        moneyCost,
+        JSON.stringify(plan.path),
+        plan.prodCost,
+        plan.moneyCost,
       ],
     );
     await db.execute('COMMIT');
