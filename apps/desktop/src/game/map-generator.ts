@@ -111,6 +111,7 @@ const LAND: Record<string, number[][]> = {
 const COMMON: ResourceType[] = [
   ResourceType.MADEIRA,
   ResourceType.FERRO,
+  ResourceType.CARVAO,
   ResourceType.BAUXITA,
   ResourceType.COBRE,
   ResourceType.TERRAS_AGRICOLAS,

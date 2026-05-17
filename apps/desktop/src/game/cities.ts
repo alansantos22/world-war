@@ -43,6 +43,10 @@ export const CITY_START_FOOD = 10;
 export const CAPITAL_START_POP = 1_000_000;
 export const CAPITAL_START_FOOD = 10;
 
+/** Teto de população de uma cidade comum (capitais têm o dobro). */
+export const CITY_POP_CAP = 2_500_000;
+export const CAPITAL_POP_CAP = 5_000_000;
+
 /** Custo de um colono (cobrado da cidade que o produz). */
 export const COLONO_COST = {
   /** População retirada da cidade ao enfileirar. */
@@ -100,9 +104,25 @@ function rowToCity(r: CityRow): City {
   };
 }
 
-/** Limite de estoque de comida de uma cidade. */
+/** Limite-base de estoque de comida de uma cidade (sem celeiros). */
 export function cityStorage(city: { isCapital: boolean }): number {
   return city.isCapital ? CAPITAL_STORAGE : CITY_STORAGE;
+}
+
+/**
+ * Capacidade de comida de uma cidade, contando os **celeiros** — cada celeiro
+ * soma 20% ao limite-base.
+ */
+export function cityFoodCapacity(
+  city: { isCapital: boolean },
+  granaries: number,
+): number {
+  return Math.round(cityStorage(city) * (1 + 0.2 * granaries));
+}
+
+/** Teto de população de uma cidade (capitais têm o dobro). */
+export function cityPopCap(city: { isCapital: boolean }): number {
+  return city.isCapital ? CAPITAL_POP_CAP : CITY_POP_CAP;
 }
 
 /** Raio da zona de influência de uma cidade. */
@@ -172,6 +192,40 @@ export async function loadCities(saveId: number): Promise<City[]> {
     [saveId],
   );
   return rows.map(rowToCity);
+}
+
+/** Um item no inventário de recursos de uma cidade (mineral ou produto). */
+export interface CityResource {
+  /** Tile da cidade dona do inventário. */
+  x: number;
+  y: number;
+  /** Código do recurso (`ResourceType`) ou produto (`COURO`/`LA`). */
+  resource: string;
+  amount: number;
+}
+
+interface CityResourceRow {
+  x: number;
+  y: number;
+  resource: string;
+  amount: number;
+}
+
+/** Carrega o inventário de recursos das cidades de uma partida. */
+export async function loadCityResources(
+  saveId: number,
+): Promise<CityResource[]> {
+  const db = await getDb();
+  const rows = await db.select<CityResourceRow[]>(
+    'SELECT x, y, resource, amount FROM city_resources WHERE save_id = ? ORDER BY id',
+    [saveId],
+  );
+  return rows.map((r) => ({
+    x: r.x,
+    y: r.y,
+    resource: r.resource,
+    amount: r.amount,
+  }));
 }
 
 // ===== Esquadrão de colonos =====

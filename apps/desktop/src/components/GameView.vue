@@ -4,10 +4,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import Flag from "./Flag.vue";
 import { GRID, CONTINENT_NAMES, hemisphereOf } from "../game/map-generator";
 import { NATIONS, type Nation, flagSeed } from "../game/nations";
-import { ALIGNMENTS, ALIGNMENT_LIST } from "../game/alignments";
+import {
+  ALIGNMENTS,
+  ALIGNMENT_LIST,
+  type AlignmentId,
+} from "../game/alignments";
 import { ResourceType } from "../game/enums";
 import { resourceInfo, resourceBoost } from "../game/resources";
-import { FACTION_STATS, TERRITORY_STATS, type FactionState } from "../game/economy";
 import {
   climateInfo,
   seasonForMonth,
@@ -23,6 +26,7 @@ import {
   regenerateMap,
   getSave,
   takeTerritory,
+  setTaxLevel,
   type Province,
   type GameSave,
 } from "../game/world";
@@ -61,6 +65,7 @@ import {
 import {
   loadCities,
   loadSettlerSquads,
+  loadCityResources,
   foundCity,
   moveSettlerSquad,
   deleteSettlerSquad,
@@ -68,15 +73,58 @@ import {
   canSettlerSquadMove,
   isSettlerSquadReady,
   cityInfluenceTiles,
-  cityStorage,
+  cityFoodCapacity,
   cityInfluence,
+  cityPopCap,
   cityFoodProduction,
   cityFoodConsumption,
   COLONO_COST,
   MIN_CITY_DISTANCE,
   type City,
   type SettlerSquad,
+  type CityResource,
 } from "../game/cities";
+import {
+  loadConstructions,
+  loadConstructionOrders,
+  assignSector,
+  queueConstruction,
+  cancelConstruction,
+  constructionCost,
+  constructionMaxPerTile,
+  constructionPopCap,
+  isConstructionForbidden,
+  resourceCapacity,
+  farmFood,
+  pastureFood,
+  isMineable,
+  resourceLabel,
+  SECTOR_LIST,
+  SECTORS,
+  CONSTRUCTIONS,
+  CONSTRUCTION_LIST,
+  PASTURE_VARIANTS,
+  type Sector,
+  type ConstructionType,
+  type Construction,
+  type ConstructionOrder,
+  type ConstructionKind,
+  type PastureVariant,
+} from "../game/constructions";
+import {
+  FACTION_STATS,
+  TERRITORY_STATS,
+  TAX_LEVELS,
+  TAX_ORDER,
+  allowedTaxLevels,
+  clampTax,
+  happinessFor,
+  cityTaxIncome,
+  ALIGNMENT_ECONOMY,
+  FACTORY_BY_ALIGNMENT,
+  type FactionState,
+  type TaxLevel,
+} from "../game/economy";
 import {
   battleModifiers,
   moralForceDelta,
@@ -125,6 +173,16 @@ const settlerSquads = ref<SettlerSquad[]>([]);
 /** Esquadrão de colonos em modo de movimento (aguarda o clique no destino). */
 const settlerMoveMode = ref<SettlerSquad | null>(null);
 
+// ===== Setores, construções e recursos =====
+/** Construções erguidas no mapa. */
+const constructions = ref<Construction[]>([]);
+/** Ordens na fila de construção das cidades. */
+const constructionOrders = ref<ConstructionOrder[]>([]);
+/** Inventário de recursos das cidades. */
+const cityResources = ref<CityResource[]>([]);
+/** `true` enquanto o painel de especialização do tile está aberto. */
+const specPanelOpen = ref(false);
+
 // ===== Cidade (inventário de tropas) =====
 /** Tropas guardadas no inventário das cidades. */
 const cityTroops = ref<CityTroop[]>([]);
@@ -164,11 +222,14 @@ const selected = ref<Province | null>(null);
 const hovered = ref<Province | null>(null);
 
 /** Painel lateral aberto no momento (null = nenhum, mapa livre). */
-type PanelId = "nations" | "alignments";
+type PanelId = "nations" | "alignments" | "economy";
 const activePanel = ref<PanelId | null>(null);
 function togglePanel(p: PanelId) {
   activePanel.value = activePanel.value === p ? null : p;
-  if (activePanel.value) cityPanelOpen.value = false;
+  if (activePanel.value) {
+    cityPanelOpen.value = false;
+    specPanelOpen.value = false;
+  }
 }
 
 // ===== Nações da partida =====
@@ -334,6 +395,7 @@ function onProvinceClick(p: Province) {
   }
   showTake.value = false;
   cityPanelOpen.value = false;
+  specPanelOpen.value = false;
   selected.value = p;
 }
 function onOceanClick() {
@@ -342,6 +404,7 @@ function onOceanClick() {
   settlerMoveMode.value = null;
   showTake.value = false;
   cityPanelOpen.value = false;
+  specPanelOpen.value = false;
   selected.value = null;
 }
 
@@ -362,6 +425,9 @@ async function load() {
     cityTroops.value = await loadCityTroops(props.saveId);
     cities.value = await loadCities(props.saveId);
     settlerSquads.value = await loadSettlerSquads(props.saveId);
+    constructions.value = await loadConstructions(props.saveId);
+    constructionOrders.value = await loadConstructionOrders(props.saveId);
+    cityResources.value = await loadCityResources(props.saveId);
     battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -377,6 +443,9 @@ async function reloadState() {
   recruitOrders.value = await loadRecruitOrders(props.saveId);
   cityTroops.value = await loadCityTroops(props.saveId);
   cities.value = await loadCities(props.saveId);
+  constructions.value = await loadConstructions(props.saveId);
+  constructionOrders.value = await loadConstructionOrders(props.saveId);
+  cityResources.value = await loadCityResources(props.saveId);
   factions.value = await loadFactions(props.saveId);
 }
 
@@ -677,7 +746,16 @@ function openCity() {
   askSquadFor.value = null;
   cityTab.value = "city";
   activePanel.value = null;
+  specPanelOpen.value = false;
   cityPanelOpen.value = true;
+}
+
+/** Abre o painel de especialização do tile selecionado. */
+function openSpec() {
+  if (!canSpecializeHere.value) return;
+  activePanel.value = null;
+  cityPanelOpen.value = false;
+  specPanelOpen.value = true;
 }
 
 // ===== Esquadrões de colonos =====
@@ -699,6 +777,11 @@ const nonCapitalCities = computed<City[]>(() =>
   cities.value.filter((c) => !c.isCapital),
 );
 
+/** Tiles especializados num setor (mostram o ícone do setor no mapa). */
+const sectorTiles = computed<Province[]>(() =>
+  provinces.value.filter((p) => p.sector),
+);
+
 /** Tiles de terra na zona de influência da cidade selecionada. */
 const selectedInfluenceTiles = computed(() => {
   const c = selectedCity.value;
@@ -712,7 +795,7 @@ const selectedInfluenceTiles = computed(() => {
 const cityFoodBalanceNote = computed(() => {
   const c = selectedCity.value;
   if (!c) return "";
-  const net = cityFoodProduction(c) - cityFoodConsumption(c.population);
+  const net = selectedCityFoodProd.value - cityFoodConsumption(c.population);
   if (net > 0) {
     return `Excedente de ${net} de comida — a população cresce ~${net}% por turno.`;
   }
@@ -815,6 +898,342 @@ async function doMoveSettler(s: SettlerSquad, dest: Province) {
     busySquad.value = false;
     settlerMoveMode.value = null;
   }
+}
+
+// ===== Setores e construções =====
+
+/** Construções erguidas no tile selecionado. */
+const constructionsHere = computed<Construction[]>(() =>
+  selected.value
+    ? constructions.value.filter(
+        (c) => c.x === selected.value!.x && c.y === selected.value!.y,
+      )
+    : [],
+);
+
+/**
+ * Cidade do jogador cuja zona de influência cobre o tile selecionado — é a
+ * cidade que recebe as construções erguidas ali.
+ */
+const influencingCity = computed<City | null>(() => {
+  const p = selected.value;
+  if (!p) return null;
+  let best: City | null = null;
+  let bestDist = Infinity;
+  for (const c of cities.value) {
+    if (c.ownerCode !== game.value?.playerCode) continue;
+    const d = chebyshev(p, c);
+    if (d <= cityInfluence(c) && d < bestDist) {
+      best = c;
+      bestDist = d;
+    }
+  }
+  return best;
+});
+
+/** `true` se o tile selecionado (seu, na influência de uma cidade) aceita setor. */
+const canSpecializeHere = computed(
+  () =>
+    !!selected.value &&
+    selected.value.ownerCode === game.value?.playerCode &&
+    !!influencingCity.value,
+);
+
+/** Setor em que o tile selecionado foi especializado (`null` = nenhum). */
+const selectedSector = computed<Sector | null>(
+  () => (selected.value?.sector as Sector | null) ?? null,
+);
+
+/** Ordens na fila de construção da cidade selecionada. */
+const constructionOrdersHere = computed<ConstructionOrder[]>(() =>
+  selected.value
+    ? constructionOrders.value.filter(
+        (o) => o.cityX === selected.value!.x && o.cityY === selected.value!.y,
+      )
+    : [],
+);
+
+/** Todas as construções do setor do tile selecionado. */
+const sectorConstructions = computed<ConstructionType[]>(() => {
+  const sector = selectedSector.value;
+  if (!sector) return [];
+  return CONSTRUCTION_LIST.filter((c) => c.sector === sector);
+});
+
+/** Quantas construções de um tipo a facção do jogador tem (erguidas + na fila). */
+function factionConstructionCount(kind: ConstructionKind): number {
+  const code = game.value?.playerCode;
+  const built = constructions.value.filter(
+    (c) => c.ownerCode === code && c.kind === kind,
+  ).length;
+  const queued = constructionOrders.value.filter(
+    (o) => o.ownerCode === code && o.kind === kind,
+  ).length;
+  return built + queued;
+}
+
+/** Construções de um tipo no tile selecionado (erguidas + na fila). */
+function tileConstructionCount(kind: ConstructionKind): number {
+  const p = selected.value;
+  if (!p) return 0;
+  const built = constructionsHere.value.filter((x) => x.kind === kind).length;
+  const queued = constructionOrders.value.filter(
+    (o) => o.targetX === p.x && o.targetY === p.y && o.kind === kind,
+  ).length;
+  return built + queued;
+}
+
+/** Motivo de não dar para construir algo no tile (vazio = pode construir). */
+function buildBlockReason(c: ConstructionType): string {
+  const p = selected.value;
+  if (!p) return "Selecione um tile.";
+  const align = playerAlignment.value;
+  if (isConstructionForbidden(c.kind, align)) {
+    return "Proibida pelo seu direcionamento.";
+  }
+  if (c.kind === "MINA" && !isMineable(p.resource)) {
+    return "Só num tile de recurso mineral.";
+  }
+  if (c.requires && factionConstructionCount(c.requires) === 0) {
+    return `Exige antes: ${CONSTRUCTIONS[c.requires].label}.`;
+  }
+  if (
+    c.maxPerFaction != null &&
+    factionConstructionCount(c.kind) >= c.maxPerFaction
+  ) {
+    return "Limite nacional atingido.";
+  }
+  if (tileConstructionCount(c.kind) >= constructionMaxPerTile(c.kind, align)) {
+    return "Limite deste tile atingido.";
+  }
+  if ((playerFaction.value?.money ?? 0) < costOf(c.kind).moneyCost) {
+    return "Dinheiro insuficiente.";
+  }
+  return "";
+}
+
+/** Inventário de recursos da cidade selecionada. */
+const cityResourcesHere = computed<CityResource[]>(() =>
+  selected.value
+    ? cityResources.value.filter(
+        (r) => r.x === selected.value!.x && r.y === selected.value!.y,
+      )
+    : [],
+);
+
+/** Nº de celeiros de uma cidade (define a capacidade de comida). */
+function granaryCount(city: City): number {
+  return constructions.value.filter(
+    (c) => c.cityX === city.x && c.cityY === city.y && c.kind === "CELEIRO",
+  ).length;
+}
+
+/** Nº de armazéns de uma cidade (define a capacidade de minérios/madeira/petróleo). */
+function armazemCount(city: City): number {
+  return constructions.value.filter(
+    (c) => c.cityX === city.x && c.cityY === city.y && c.kind === "ARMAZEM",
+  ).length;
+}
+
+/** Energia gerada e consumida pela cidade selecionada. */
+const selectedCityEnergy = computed(() => {
+  let production = 0;
+  let consumption = 0;
+  for (const c of selectedCityConstructions.value) {
+    const def = CONSTRUCTIONS[c.kind];
+    production += def.energyOutput ?? 0;
+    consumption += def.energyCost ?? 0;
+  }
+  return { production, consumption };
+});
+
+/** Construções da cidade selecionada (em toda a sua zona de influência). */
+const selectedCityConstructions = computed<Construction[]>(() =>
+  selectedCity.value
+    ? constructions.value.filter(
+        (c) =>
+          c.cityX === selectedCity.value!.x &&
+          c.cityY === selectedCity.value!.y,
+      )
+    : [],
+);
+
+/** Produção de comida da cidade selecionada (base + fazendas + pastos). */
+const selectedCityFoodProd = computed(() => {
+  const city = selectedCity.value;
+  if (!city) return 0;
+  let food = cityFoodProduction(city);
+  for (const c of selectedCityConstructions.value) {
+    if (c.kind === "FAZENDA") {
+      const prov = provinceByTile.value.get(`${c.x},${c.y}`);
+      if (prov) food += farmFood(prov);
+    } else if (c.kind === "PASTO") {
+      food += pastureFood(c.variant);
+    }
+  }
+  return food;
+});
+
+/** Capacidade de comida da cidade selecionada (com os celeiros). */
+const selectedCityFoodCap = computed(() =>
+  selectedCity.value
+    ? cityFoodCapacity(selectedCity.value, granaryCount(selectedCity.value))
+    : 0,
+);
+
+/** Teto de população da cidade selecionada (base + conjuntos/áreas urbanas). */
+const selectedCityPopCap = computed(() => {
+  const city = selectedCity.value;
+  if (!city) return 0;
+  let cap = cityPopCap(city);
+  for (const c of selectedCityConstructions.value) {
+    if (c.kind === "CONJUNTO" || c.kind === "AREA_URBANA") {
+      cap += constructionPopCap(c.kind, playerAlignment.value);
+    }
+  }
+  return cap;
+});
+
+/** Custo de uma construção no tile selecionado (varia com recurso e direcionamento). */
+function costOf(kind: ConstructionKind) {
+  return constructionCost(kind, playerAlignment.value, selected.value?.resource);
+}
+
+/** Atribui um setor ao tile selecionado. */
+async function doAssignSector(sector: Sector) {
+  const p = selected.value;
+  if (!p) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await assignSector(props.saveId, p.x, p.y, sector);
+    provinces.value = await loadMap(props.saveId);
+    selected.value =
+      provinces.value.find((q) => q.x === p.x && q.y === p.y) ?? null;
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Enfileira uma construção no tile selecionado, na cidade que o influencia. */
+async function doQueueConstruction(
+  kind: ConstructionKind,
+  variant: PastureVariant | null = null,
+) {
+  const p = selected.value;
+  const city = influencingCity.value;
+  if (!p || !city || !game.value?.playerCode) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await queueConstruction(
+      props.saveId,
+      game.value.playerCode,
+      playerAlignment.value,
+      city.x,
+      city.y,
+      p.x,
+      p.y,
+      kind,
+      variant,
+      p.resource,
+    );
+    constructionOrders.value = await loadConstructionOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+    flashToast(`${CONSTRUCTIONS[kind].label} enfileirada para construção.`);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Cancela uma ordem de construção e devolve o dinheiro pago. */
+async function doCancelConstruction(orderId: number) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await cancelConstruction(orderId);
+    constructionOrders.value = await loadConstructionOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+// ===== Economia e imposto =====
+
+/** Direcionamento político da facção do jogador. */
+const playerAlignment = computed<AlignmentId>(
+  () => playerNation.value?.alignment ?? "INDEPENDENTE",
+);
+
+/** Nível de imposto efetivo do jogador (respeitando o teto do direcionamento). */
+const playerTaxLevel = computed<TaxLevel>(() =>
+  clampTax(playerFaction.value?.taxLevel ?? "MEDIO", playerAlignment.value),
+);
+
+/** Níveis de imposto que o jogador pode escolher. */
+const playerTaxOptions = computed<TaxLevel[]>(() =>
+  allowedTaxLevels(playerAlignment.value),
+);
+
+/** Felicidade da facção do jogador, derivada do nível de imposto. */
+const playerHappiness = computed(() => happinessFor(playerTaxLevel.value));
+
+/** Resumo da renda por turno da facção do jogador. */
+const incomeSummary = computed(() => {
+  const code = game.value?.playerCode;
+  const align = playerAlignment.value;
+  const factory = FACTORY_BY_ALIGNMENT[align];
+  const econ = ALIGNMENT_ECONOMY[align];
+  let tax = 0;
+  let factoryMoney = 0;
+  for (const c of cities.value) {
+    if (c.ownerCode !== code) continue;
+    tax += cityTaxIncome(c.population, playerTaxLevel.value, align);
+    const factories = constructions.value.filter(
+      (x) => x.cityX === c.x && x.cityY === c.y && x.kind === "FABRICA",
+    ).length;
+    factoryMoney += Math.round(factories * factory.money * econ.industrialMult);
+  }
+  return { tax, factory: factoryMoney, total: tax + factoryMoney };
+});
+
+/** Define o nível de imposto da facção do jogador. */
+async function doSetTax(level: TaxLevel) {
+  const code = game.value?.playerCode;
+  if (!code) return;
+  busy.value = true;
+  err.value = "";
+  try {
+    await setTaxLevel(props.saveId, code, level);
+    factions.value = await loadFactions(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** Produção efetiva da cidade selecionada (produção da província + fábricas). */
+const selectedCityEffProd = computed(() => {
+  const base = selected.value?.production ?? 0;
+  const factories = selectedCityConstructions.value.filter(
+    (c) => c.kind === "FABRICA",
+  ).length;
+  return base + factories * FACTORY_BY_ALIGNMENT[playerAlignment.value].productivity;
+});
+
+/** Turnos restantes para concluir uma ordem da fila de construção. */
+function constructionEta(o: ConstructionOrder): number {
+  const prod = selectedCityEffProd.value;
+  if (prod <= 0) return Infinity;
+  return Math.ceil((o.prodCost - o.prodDone) / prod);
 }
 
 /**
@@ -1278,7 +1697,9 @@ const alignmentCounts = computed(() => {
 const panelTitle = computed(() =>
   activePanel.value === "nations"
     ? "Nações do Mundo"
-    : "Direcionamentos Políticos",
+    : activePanel.value === "economy"
+      ? "Economia"
+      : "Direcionamentos Políticos",
 );
 
 function provinceFill(p: Province): string {
@@ -1440,6 +1861,20 @@ function provinceFill(p: Province): string {
         style="pointer-events: none"
       >
         🏛️
+      </text>
+      <!-- Ícone do setor nos tiles especializados -->
+      <text
+        v-for="p in sectorTiles"
+        :key="'sec' + p.id"
+        :x="p.x + 0.8"
+        :y="p.y + 0.8"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size="0.36"
+        opacity="0.9"
+        style="pointer-events: none"
+      >
+        {{ p.sector ? SECTORS[p.sector].icon : "" }}
       </text>
       <!-- Destinos válidos do esquadrão em movimento -->
       <rect
@@ -1647,6 +2082,14 @@ function provinceFill(p: Province): string {
           @click="togglePanel('alignments')"
         >
           🎖️
+        </button>
+        <button
+          class="side-btn"
+          :class="{ on: activePanel === 'economy' }"
+          title="Economia"
+          @click="togglePanel('economy')"
+        >
+          💰
         </button>
         <button
           class="side-btn"
@@ -2071,6 +2514,22 @@ function provinceFill(p: Province): string {
             </button>
           </template>
 
+          <!-- Especialização do tile (zona de influência de uma cidade) -->
+          <button
+            v-if="canSpecializeHere"
+            class="squad-city"
+            :disabled="busySquad"
+            title="Escolher o setor e as construções do tile"
+            @click="openSpec"
+          >
+            🏗️
+            {{
+              selectedSector
+                ? "Setor: " + SECTORS[selectedSector].label
+                : "Escolher especialização"
+            }}
+          </button>
+
           <!-- Combate: o tile não é da sua facção e você tem esquadrão nele -->
           <template v-if="isContestedTile">
             <div class="squad-head"><span>Combate</span></div>
@@ -2214,12 +2673,14 @@ function provinceFill(p: Province): string {
                   <span class="ci-stat-val">
                     {{ fmt(selectedCity.population) }}
                   </span>
-                  <span class="ci-stat-label">População</span>
+                  <span class="ci-stat-label">
+                    População · teto {{ fmt(selectedCityPopCap) }}
+                  </span>
                 </div>
                 <div class="ci-stat">
                   <span class="ci-stat-icon">🌾</span>
                   <span class="ci-stat-val">
-                    {{ selectedCity.food }}/{{ cityStorage(selectedCity) }}
+                    {{ selectedCity.food }}/{{ selectedCityFoodCap }}
                   </span>
                   <span class="ci-stat-label">Comida (estoque)</span>
                 </div>
@@ -2237,17 +2698,47 @@ function provinceFill(p: Province): string {
                   </span>
                   <span class="ci-stat-label">Influência</span>
                 </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">⚡</span>
+                  <span class="ci-stat-val">
+                    {{ selectedCityEnergy.production }}/{{
+                      selectedCityEnergy.consumption
+                    }}
+                  </span>
+                  <span class="ci-stat-label">Energia (gera/usa)</span>
+                </div>
               </div>
               <div class="ci-label">Comida por turno</div>
               <div class="ci-food">
                 <span class="up">
-                  +{{ cityFoodProduction(selectedCity) }} produção
+                  +{{ selectedCityFoodProd }} produção
                 </span>
                 <span class="down">
                   −{{ cityFoodConsumption(selectedCity.population) }} consumo
                 </span>
               </div>
               <p class="ci-note">{{ cityFoodBalanceNote }}</p>
+
+              <!-- Inventário de recursos da cidade -->
+              <div class="ci-label">
+                <span>Recursos da cidade</span>
+                <span class="squad-count">{{ cityResourcesHere.length }}</span>
+              </div>
+              <p v-if="cityResourcesHere.length === 0" class="squad-empty">
+                Nenhum recurso — minas e pastos enchem o inventário.
+              </p>
+              <div v-else class="ci-resources">
+                <span
+                  v-for="r in cityResourcesHere"
+                  :key="r.resource"
+                  class="ci-res"
+                  :title="resourceLabel(r.resource).label"
+                >
+                  {{ resourceLabel(r.resource).icon }} {{ r.amount }}/{{
+                    resourceCapacity(r.resource, armazemCount(selectedCity))
+                  }}
+                </span>
+              </div>
             </template>
 
             <!-- ===== Aba: produção ===== -->
@@ -2408,6 +2899,68 @@ function provinceFill(p: Province): string {
                   Nada em produção nesta cidade.
                 </p>
               </div>
+
+              <!-- Fila de construção (paralela à de tropas/colonos) -->
+              <div class="rc-block">
+                <div class="rc-label">
+                  <span>Fila de construção</span>
+                  <span class="squad-count">
+                    {{ constructionOrdersHere.length }}
+                  </span>
+                </div>
+                <p class="rc-note">
+                  Enfileire construções pelo painel de um tile da zona de
+                  influência (clique no tile e escolha um setor).
+                </p>
+                <div
+                  v-for="(o, i) in constructionOrdersHere"
+                  :key="o.id"
+                  class="rc-order"
+                >
+                  <span class="rc-order-pos">{{ i + 1 }}</span>
+                  <div class="rc-order-info">
+                    <div class="rc-order-name">
+                      {{ CONSTRUCTIONS[o.kind].icon }}
+                      {{ CONSTRUCTIONS[o.kind].label }}
+                      <span class="dim">
+                        → tile {{ o.targetX }},{{ o.targetY }}
+                      </span>
+                    </div>
+                    <div class="rc-progress">
+                      <div
+                        class="rc-progress-fill"
+                        :style="{
+                          width:
+                            Math.min(100, (o.prodDone / o.prodCost) * 100) +
+                            '%',
+                        }"
+                      ></div>
+                    </div>
+                    <div class="rc-order-meta">
+                      {{ o.prodDone }}/{{ o.prodCost }} produção
+                      <span class="dimsep">·</span>
+                      <span v-if="i === 0">
+                        ~{{ constructionEta(o) }} turno(s)
+                      </span>
+                      <span v-else class="dim">aguardando na fila</span>
+                    </div>
+                  </div>
+                  <button
+                    class="sbtn danger rc-cancel"
+                    :disabled="busySquad"
+                    title="Cancelar — devolve o dinheiro pago"
+                    @click="doCancelConstruction(o.id)"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p
+                  v-if="constructionOrdersHere.length === 0"
+                  class="squad-empty"
+                >
+                  Nenhuma construção em andamento.
+                </p>
+              </div>
             </template>
 
             <!-- ===== Aba: inventário ===== -->
@@ -2484,6 +3037,128 @@ function provinceFill(p: Province): string {
         </section>
       </Transition>
 
+      <!-- Painel de especialização do tile (direita) -->
+      <Transition name="slide">
+        <section
+          v-if="specPanelOpen && selected"
+          class="card city-panel"
+        >
+          <div class="card-head">
+            <div class="head-title">🏗️ {{ selected.name }}</div>
+            <button class="x" @click="specPanelOpen = false">✕</button>
+          </div>
+          <div class="city-body">
+            <!-- Sem setor: escolher -->
+            <template v-if="!selectedSector">
+              <p class="ci-note">
+                Especialize este tile num setor para erguer construções — a
+                produção vai para a cidade que cobre o tile.
+              </p>
+              <div class="sector-grid">
+                <button
+                  v-for="s in SECTOR_LIST"
+                  :key="s.id"
+                  class="sector-btn"
+                  :disabled="busySquad"
+                  @click="doAssignSector(s.id)"
+                >
+                  <span class="sector-icon">{{ s.icon }}</span>
+                  <span>{{ s.label }}</span>
+                </button>
+              </div>
+            </template>
+
+            <!-- Com setor: construções -->
+            <template v-else>
+              <div class="ci-label">
+                <span>
+                  {{ SECTORS[selectedSector].icon }} Setor
+                  {{ SECTORS[selectedSector].label }}
+                </span>
+                <button
+                  v-if="
+                    constructionsHere.length === 0 &&
+                    constructionOrdersHere.length === 0
+                  "
+                  class="mini-btn"
+                  :disabled="busySquad"
+                  title="Limpar o setor para escolher outro"
+                  @click="doAssignSector(selectedSector)"
+                >
+                  trocar
+                </button>
+              </div>
+
+              <div v-if="constructionsHere.length > 0" class="cons-built">
+                <span
+                  v-for="c in constructionsHere"
+                  :key="c.id"
+                  class="cons-chip"
+                >
+                  {{ CONSTRUCTIONS[c.kind].icon }}
+                  {{ CONSTRUCTIONS[c.kind].label }}
+                  <span v-if="c.variant" class="dim">
+                    · {{ c.variant.toLowerCase() }}
+                  </span>
+                </span>
+              </div>
+
+              <p v-if="sectorConstructions.length === 0" class="squad-empty">
+                As construções deste setor chegam em breve.
+              </p>
+              <div
+                v-for="c in sectorConstructions"
+                :key="c.kind"
+                class="cons-item"
+              >
+                <div class="cons-info">
+                  <div class="cons-name">{{ c.icon }} {{ c.label }}</div>
+                  <div class="cons-desc">{{ c.description }}</div>
+                  <div class="cons-costs">
+                    <span title="Custo de produção">
+                      🏭 {{ costOf(c.kind).prodCost }}
+                    </span>
+                    <span title="Custo de dinheiro">
+                      💰 {{ costOf(c.kind).moneyCost }}
+                    </span>
+                    <span v-if="c.energyCost" title="Energia consumida">
+                      ⚡ {{ c.energyCost }}
+                    </span>
+                    <span v-if="c.energyOutput" title="Energia gerada">
+                      ⚡ +{{ c.energyOutput }}
+                    </span>
+                  </div>
+                  <div v-if="buildBlockReason(c)" class="cons-block">
+                    {{ buildBlockReason(c) }}
+                  </div>
+                </div>
+                <div v-if="c.kind === 'PASTO'" class="pasture-variants">
+                  <button
+                    v-for="v in PASTURE_VARIANTS"
+                    :key="v.id"
+                    class="sbtn"
+                    :disabled="busySquad || buildBlockReason(c) !== ''"
+                    :title="buildBlockReason(c) || v.effect"
+                    @click="doQueueConstruction('PASTO', v.id)"
+                  >
+                    {{ v.icon }} {{ v.label }}
+                  </button>
+                </div>
+                <button
+                  v-else
+                  class="sbtn ok"
+                  :disabled="busySquad || buildBlockReason(c) !== ''"
+                  :title="buildBlockReason(c) || 'Construir'"
+                  @click="doQueueConstruction(c.kind)"
+                >
+                  Construir
+                </button>
+              </div>
+            </template>
+          </div>
+        </section>
+      </Transition>
+
       <!-- Painel lateral (abre por botão) -->
       <Transition name="slide">
         <section v-if="activePanel" class="card panel">
@@ -2537,7 +3212,7 @@ function provinceFill(p: Province): string {
               </tbody>
             </table>
 
-            <div v-else class="aligns">
+            <div v-else-if="activePanel === 'alignments'" class="aligns">
               <div
                 v-for="a in ALIGNMENT_LIST"
                 :key="a.id"
@@ -2556,6 +3231,73 @@ function provinceFill(p: Province): string {
               <p class="note">
                 O direcionamento do jogador definirá as chances de aliança com
                 outras facções — mecânica a ser implementada.
+              </p>
+            </div>
+
+            <!-- ===== Economia ===== -->
+            <div v-else class="economy">
+              <div class="ci-label">Nível de imposto</div>
+              <div class="tax-options">
+                <button
+                  v-for="lv in TAX_ORDER"
+                  :key="lv"
+                  class="tax-btn"
+                  :class="{ on: playerTaxLevel === lv }"
+                  :disabled="busy || !playerTaxOptions.includes(lv)"
+                  :title="
+                    playerTaxOptions.includes(lv)
+                      ? TAX_LEVELS[lv].label
+                      : 'O seu direcionamento não permite este nível de imposto'
+                  "
+                  @click="doSetTax(lv)"
+                >
+                  {{ TAX_LEVELS[lv].label }}
+                </button>
+              </div>
+              <p class="ci-note">
+                O direcionamento <strong>{{
+                  ALIGNMENTS[playerAlignment].label
+                }}</strong>
+                permite imposto até
+                <strong>{{
+                  TAX_LEVELS[playerTaxOptions[playerTaxOptions.length - 1]]
+                    .label
+                }}</strong>.
+              </p>
+
+              <div class="econ-grid">
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">😊</span>
+                  <span class="ci-stat-val">{{ playerHappiness }}%</span>
+                  <span class="ci-stat-label">Felicidade</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">💰</span>
+                  <span class="ci-stat-val">
+                    +{{ fmt(incomeSummary.total) }}
+                  </span>
+                  <span class="ci-stat-label">Renda / turno</span>
+                </div>
+              </div>
+
+              <div class="ci-label">Renda por turno</div>
+              <div class="econ-lines">
+                <div class="econ-line">
+                  <span>👥 Impostos da população</span>
+                  <span class="up">+{{ fmt(incomeSummary.tax) }}</span>
+                </div>
+                <div class="econ-line">
+                  <span>🏭 Zonas de fábrica</span>
+                  <span class="up">+{{ fmt(incomeSummary.factory) }}</span>
+                </div>
+                <div class="econ-line total">
+                  <span>Total</span>
+                  <span class="up">+{{ fmt(incomeSummary.total) }}</span>
+                </div>
+              </div>
+              <p class="note">
+                A felicidade ainda não afeta o jogo — vai influenciar o
+                crescimento da população mais adiante.
               </p>
             </div>
           </div>
@@ -4728,6 +5470,169 @@ tr.me {
   font-size: 0.74rem;
   font-style: italic;
   color: #7d8694;
+}
+/* Inventário de recursos da cidade */
+.ci-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ci-res {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #cdd2da;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+/* ===== Setores e construções ===== */
+.sector-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  margin: 4px 0 2px;
+}
+.sector-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: #cdd2da;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sector-btn:hover:not(:disabled) {
+  border-color: #e8c14a;
+  color: #fff;
+}
+.sector-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.sector-icon {
+  font-size: 1.1rem;
+}
+.cons-built {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0;
+}
+.cons-chip {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #cdd2da;
+  background: rgba(95, 200, 120, 0.14);
+  border: 1px solid rgba(95, 200, 120, 0.4);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.cons-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 9px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.cons-info {
+  flex: 1;
+  min-width: 0;
+}
+.cons-name {
+  font-size: 0.84rem;
+  font-weight: 800;
+  color: #e6e9ee;
+}
+.cons-desc {
+  font-size: 0.72rem;
+  color: #8a92a0;
+  margin-top: 1px;
+}
+.cons-costs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #c9a24a;
+}
+.cons-block {
+  margin-top: 3px;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: #e6917a;
+}
+.pasture-variants {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* ===== Painel Economia ===== */
+.economy {
+  display: flex;
+  flex-direction: column;
+}
+.tax-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.tax-btn {
+  padding: 8px 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: #cdd2da;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.tax-btn.on {
+  border-color: #e8c14a;
+  background: rgba(232, 193, 74, 0.18);
+  color: #f3d069;
+}
+.tax-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.econ-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin: 10px 0 2px;
+}
+.econ-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.econ-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #cdd2da;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+.econ-line.total {
+  border-color: rgba(232, 193, 74, 0.5);
+}
+.econ-line .up {
+  color: #9ad187;
 }
 .ci-troop {
   display: flex;

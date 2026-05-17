@@ -1,0 +1,952 @@
+/**
+ * Setores e construções (estilo Civilization).
+ *
+ * Cada tile da **zona de influência** de uma cidade pode ser **especializado**
+ * num **setor** e, então, receber **construções** daquele setor — fazendas,
+ * minas, fábricas, usinas, conjuntos habitacionais, bancos etc. As construções
+ * entram numa **fila própria por cidade** e, ao ficarem prontas, produzem
+ * comida, recursos, dinheiro, cultura e energia. Ver `GAME_DESIGN.md`.
+ *
+ * O catálogo já prevê o **sistema de pesquisa** futuro: cada construção tem o
+ * campo `requiresResearch` (hoje sempre `null` — tudo destravado).
+ */
+
+import { getDb } from '../db';
+import { ResourceType } from './enums';
+import { ClimateZone } from './climate';
+import { resourceInfo, resourceBoost } from './resources';
+import type { AlignmentId } from './alignments';
+
+// ===== Setores =====
+
+/** Os setores em que um tile pode ser especializado. */
+export type Sector =
+  | 'AGRICOLA'
+  | 'INDUSTRIAL'
+  | 'URBANO'
+  | 'COMERCIAL'
+  | 'RELIGIOSO'
+  | 'MILITAR';
+
+export interface SectorInfo {
+  id: Sector;
+  label: string;
+  icon: string;
+}
+
+export const SECTORS: Record<Sector, SectorInfo> = {
+  AGRICOLA: { id: 'AGRICOLA', label: 'Agrícola', icon: '🌾' },
+  INDUSTRIAL: { id: 'INDUSTRIAL', label: 'Industrial', icon: '🏭' },
+  URBANO: { id: 'URBANO', label: 'Urbano', icon: '🏙️' },
+  COMERCIAL: { id: 'COMERCIAL', label: 'Comercial', icon: '🏬' },
+  RELIGIOSO: { id: 'RELIGIOSO', label: 'Religioso', icon: '⛪' },
+  MILITAR: { id: 'MILITAR', label: 'Militar', icon: '🏰' },
+};
+
+export const SECTOR_LIST: SectorInfo[] = Object.values(SECTORS);
+
+// ===== Construções =====
+
+/** Tipos de construção. */
+export type ConstructionKind =
+  // Agrícola
+  | 'FAZENDA'
+  | 'CELEIRO'
+  | 'PASTO'
+  // Industrial
+  | 'MINA'
+  | 'FABRICA'
+  | 'ARMAZEM'
+  | 'MADEIREIRA'
+  | 'OLEODUTO'
+  | 'USINA_CARVAO'
+  | 'USINA_NUCLEAR'
+  | 'USINA_PETROLEO'
+  // Urbano
+  | 'CONJUNTO'
+  | 'AREA_URBANA'
+  | 'MUSEU'
+  | 'TEATRO'
+  | 'CENTRO_POLICIAL'
+  | 'PROPAGANDA'
+  | 'RADIO'
+  | 'TV'
+  // Comercial
+  | 'MERCADO_LOCAL'
+  | 'SHOPPING'
+  | 'ZONA_COMERCIAL'
+  | 'BANCO'
+  | 'BOLSA'
+  | 'AGENCIA_BANCARIA'
+  | 'MERCADO_EXTERIOR'
+  | 'MERCADO_MILITAR';
+
+/** Variantes do pasto — o rebanho criado. */
+export type PastureVariant = 'GADO' | 'OVELHA' | 'PORCO';
+
+export interface ConstructionType {
+  kind: ConstructionKind;
+  label: string;
+  icon: string;
+  sector: Sector;
+  /** Custo de produção (a cidade constrói ao longo de vários turnos). */
+  prodCost: number;
+  /** Custo de dinheiro (cobrado da facção ao enfileirar). */
+  moneyCost: number;
+  /** Máximo dessa construção por tile. */
+  maxPerTile: number;
+  /** Máximo dessa construção por **facção** (construções nacionais). */
+  maxPerFaction?: number;
+  /** Direcionamentos políticos em que a construção é proibida. */
+  forbidden?: AlignmentId[];
+  /** Construção que precisa existir na facção para destravar esta. */
+  requires?: ConstructionKind;
+  description: string;
+  /** Pesquisa necessária para destravar — `null` enquanto não há pesquisa. */
+  requiresResearch: string | null;
+  /** Cultura gerada por turno. */
+  culturePerTurn?: number;
+  /** Dinheiro gerado por turno. */
+  moneyPerTurn?: number;
+  /** Pontos de energia gerados (usinas). */
+  energyOutput?: number;
+  /** Pontos de energia consumidos para funcionar. */
+  energyCost?: number;
+  /** Aumento-base do teto de população. */
+  popCap?: number;
+  /** Recurso coletado por turno (madeireira, oleoduto). */
+  collects?: { resource: ResourceType; amount: number };
+  /** Combustível consumido por turno (usinas). */
+  fuel?: { resource: ResourceType; amount: number };
+}
+
+/** Catálogo das construções. */
+export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
+  // ===== Agrícola =====
+  FAZENDA: {
+    kind: 'FAZENDA',
+    label: 'Fazenda',
+    icon: '🌾',
+    sector: 'AGRICOLA',
+    prodCost: 450,
+    moneyCost: 2500,
+    maxPerTile: 1,
+    description:
+      'Produz 5 de comida — ×3 e com bônus de clima num tile de Terras Agrícolas.',
+    requiresResearch: null,
+  },
+  CELEIRO: {
+    kind: 'CELEIRO',
+    label: 'Celeiro',
+    icon: '🛖',
+    sector: 'AGRICOLA',
+    prodCost: 350,
+    moneyCost: 1000,
+    maxPerTile: 2,
+    description: '+20% na capacidade de estoque de comida da cidade.',
+    requiresResearch: null,
+  },
+  PASTO: {
+    kind: 'PASTO',
+    label: 'Pasto',
+    icon: '🐄',
+    sector: 'AGRICOLA',
+    prodCost: 600,
+    moneyCost: 4000,
+    maxPerTile: 1,
+    description:
+      'Produz 5 de comida. Gado dá couro, ovelha dá lã, porco dá +2 de comida.',
+    requiresResearch: null,
+  },
+  // ===== Industrial =====
+  MINA: {
+    kind: 'MINA',
+    label: 'Mina',
+    icon: '⛏️',
+    sector: 'INDUSTRIAL',
+    prodCost: 600,
+    moneyCost: 6500,
+    maxPerTile: 1,
+    description:
+      'Extrai o recurso mineral do tile (3/turno; recursos raros 1/turno).',
+    requiresResearch: null,
+  },
+  FABRICA: {
+    kind: 'FABRICA',
+    label: 'Zona de fábricas',
+    icon: '🏭',
+    sector: 'INDUSTRIAL',
+    prodCost: 700,
+    moneyCost: 5000,
+    maxPerTile: 1,
+    description:
+      'Aumenta a produtividade da cidade (e o dinheiro, conforme o direcionamento).',
+    requiresResearch: null,
+  },
+  ARMAZEM: {
+    kind: 'ARMAZEM',
+    label: 'Armazém',
+    icon: '📦',
+    sector: 'INDUSTRIAL',
+    prodCost: 500,
+    moneyCost: 3500,
+    maxPerTile: 2,
+    description:
+      '+50% na capacidade de minérios, madeira e petróleo da cidade.',
+    requiresResearch: null,
+  },
+  MADEIREIRA: {
+    kind: 'MADEIREIRA',
+    label: 'Madeireira',
+    icon: '🪵',
+    sector: 'INDUSTRIAL',
+    prodCost: 600,
+    moneyCost: 4000,
+    maxPerTile: 1,
+    description: 'Coleta 2 de madeira por turno (tile de Madeira).',
+    requiresResearch: null,
+    collects: { resource: ResourceType.MADEIRA, amount: 2 },
+  },
+  OLEODUTO: {
+    kind: 'OLEODUTO',
+    label: 'Oleoduto',
+    icon: '🛢️',
+    sector: 'INDUSTRIAL',
+    prodCost: 1200,
+    moneyCost: 15000,
+    maxPerTile: 1,
+    description: 'Coleta 2 de petróleo por turno (tile de Petróleo).',
+    requiresResearch: null,
+    collects: { resource: ResourceType.PETROLEO, amount: 2 },
+  },
+  USINA_CARVAO: {
+    kind: 'USINA_CARVAO',
+    label: 'Usina a carvão',
+    icon: '⚫',
+    sector: 'INDUSTRIAL',
+    prodCost: 1000,
+    moneyCost: 11000,
+    maxPerTile: 1,
+    description: 'Consome 2 de carvão por turno e gera 10 de energia.',
+    requiresResearch: null,
+    energyOutput: 10,
+    fuel: { resource: ResourceType.CARVAO, amount: 2 },
+  },
+  USINA_NUCLEAR: {
+    kind: 'USINA_NUCLEAR',
+    label: 'Usina nuclear',
+    icon: '☢️',
+    sector: 'INDUSTRIAL',
+    prodCost: 4000,
+    moneyCost: 45000,
+    maxPerTile: 1,
+    description: 'Consome 1 de urânio por turno e gera 45 de energia.',
+    requiresResearch: null,
+    energyOutput: 45,
+    fuel: { resource: ResourceType.URANIO, amount: 1 },
+  },
+  USINA_PETROLEO: {
+    kind: 'USINA_PETROLEO',
+    label: 'Usina de petróleo',
+    icon: '🔥',
+    sector: 'INDUSTRIAL',
+    prodCost: 1500,
+    moneyCost: 24000,
+    maxPerTile: 1,
+    description: 'Consome 1 de petróleo por turno e gera 20 de energia.',
+    requiresResearch: null,
+    energyOutput: 20,
+    fuel: { resource: ResourceType.PETROLEO, amount: 1 },
+  },
+  // ===== Urbano =====
+  CONJUNTO: {
+    kind: 'CONJUNTO',
+    label: 'Conjunto habitacional',
+    icon: '🏘️',
+    sector: 'URBANO',
+    prodCost: 900,
+    moneyCost: 12000,
+    maxPerTile: 2,
+    description:
+      '+500 mil no teto de população (+750 mil no comunismo).',
+    requiresResearch: null,
+    popCap: 500_000,
+  },
+  AREA_URBANA: {
+    kind: 'AREA_URBANA',
+    label: 'Área urbana',
+    icon: '🏙️',
+    sector: 'URBANO',
+    prodCost: 1200,
+    moneyCost: 8000,
+    maxPerTile: 1,
+    forbidden: ['COMUNISTA'],
+    description:
+      '+500 mil no teto de população (+800 mil nos estados independentes).',
+    requiresResearch: null,
+    popCap: 500_000,
+  },
+  MUSEU: {
+    kind: 'MUSEU',
+    label: 'Museu',
+    icon: '🏛️',
+    sector: 'URBANO',
+    prodCost: 250,
+    moneyCost: 4500,
+    maxPerTile: 1,
+    description: 'Gera 2 de cultura por turno (relíquias e felicidade em breve).',
+    requiresResearch: null,
+    culturePerTurn: 2,
+  },
+  TEATRO: {
+    kind: 'TEATRO',
+    label: 'Teatro',
+    icon: '🎭',
+    sector: 'URBANO',
+    prodCost: 230,
+    moneyCost: 3000,
+    maxPerTile: 1,
+    description: 'Gera 5 de cultura por turno.',
+    requiresResearch: null,
+    culturePerTurn: 5,
+  },
+  CENTRO_POLICIAL: {
+    kind: 'CENTRO_POLICIAL',
+    label: 'Centro policial',
+    icon: '🚓',
+    sector: 'URBANO',
+    prodCost: 300,
+    moneyCost: 3500,
+    maxPerTile: 1,
+    description: 'Aumenta a ordem e a lealdade da cidade (em breve).',
+    requiresResearch: null,
+  },
+  PROPAGANDA: {
+    kind: 'PROPAGANDA',
+    label: 'Agência de propaganda',
+    icon: '📢',
+    sector: 'URBANO',
+    prodCost: 400,
+    moneyCost: 6000,
+    maxPerTile: 1,
+    forbidden: ['INDEPENDENTE'],
+    description: 'Aumenta a ordem e a lealdade da cidade (em breve).',
+    requiresResearch: null,
+  },
+  RADIO: {
+    kind: 'RADIO',
+    label: 'Emissora de rádio',
+    icon: '📻',
+    sector: 'URBANO',
+    prodCost: 400,
+    moneyCost: 2500,
+    maxPerTile: 1,
+    description: 'Gera 4 de cultura por turno. Consome 1 de energia.',
+    requiresResearch: null,
+    culturePerTurn: 4,
+    energyCost: 1,
+  },
+  TV: {
+    kind: 'TV',
+    label: 'Emissora de TV',
+    icon: '📺',
+    sector: 'URBANO',
+    prodCost: 500,
+    moneyCost: 4500,
+    maxPerTile: 1,
+    description: 'Gera 7 de cultura por turno. Consome 1 de energia.',
+    requiresResearch: null,
+    culturePerTurn: 7,
+    energyCost: 1,
+  },
+  // ===== Comercial =====
+  MERCADO_LOCAL: {
+    kind: 'MERCADO_LOCAL',
+    label: 'Mercado local',
+    icon: '🏪',
+    sector: 'COMERCIAL',
+    prodCost: 450,
+    moneyCost: 5000,
+    maxPerTile: 1,
+    description: 'Gera 500 de dinheiro por turno.',
+    requiresResearch: null,
+    moneyPerTurn: 500,
+  },
+  SHOPPING: {
+    kind: 'SHOPPING',
+    label: 'Shopping center',
+    icon: '🏬',
+    sector: 'COMERCIAL',
+    prodCost: 600,
+    moneyCost: 9500,
+    maxPerTile: 1,
+    forbidden: ['COMUNISTA'],
+    description: 'Gera 900 de dinheiro por turno.',
+    requiresResearch: null,
+    moneyPerTurn: 900,
+  },
+  ZONA_COMERCIAL: {
+    kind: 'ZONA_COMERCIAL',
+    label: 'Zona comercial',
+    icon: '🏙️',
+    sector: 'COMERCIAL',
+    prodCost: 600,
+    moneyCost: 16000,
+    maxPerTile: 1,
+    forbidden: ['COMUNISTA'],
+    description:
+      'Gera 1.250 de dinheiro por turno (1.700 nos estados independentes).',
+    requiresResearch: null,
+    moneyPerTurn: 1250,
+  },
+  BANCO: {
+    kind: 'BANCO',
+    label: 'Banco Nacional',
+    icon: '🏦',
+    sector: 'COMERCIAL',
+    prodCost: 650,
+    moneyCost: 30000,
+    maxPerTile: 1,
+    maxPerFaction: 1,
+    forbidden: ['INDEPENDENTE'],
+    description:
+      '+30% (império/república) ou +20% nos ganhos das zonas comerciais.',
+    requiresResearch: null,
+  },
+  BOLSA: {
+    kind: 'BOLSA',
+    label: 'Bolsa de valores',
+    icon: '📈',
+    sector: 'COMERCIAL',
+    prodCost: 500,
+    moneyCost: 50000,
+    maxPerTile: 1,
+    maxPerFaction: 1,
+    forbidden: ['COMUNISTA'],
+    description:
+      '+15% (+30% nos estados independentes) nos ganhos comerciais e industriais.',
+    requiresResearch: null,
+  },
+  AGENCIA_BANCARIA: {
+    kind: 'AGENCIA_BANCARIA',
+    label: 'Agência bancária',
+    icon: '🏧',
+    sector: 'COMERCIAL',
+    prodCost: 150,
+    moneyCost: 8000,
+    maxPerTile: 1,
+    requires: 'BANCO',
+    description: '+10% nos ganhos comerciais e industriais da facção.',
+    requiresResearch: null,
+  },
+  MERCADO_EXTERIOR: {
+    kind: 'MERCADO_EXTERIOR',
+    label: 'Mercado exterior',
+    icon: '🌐',
+    sector: 'COMERCIAL',
+    prodCost: 300,
+    moneyCost: 6000,
+    maxPerTile: 1,
+    maxPerFaction: 1,
+    description: 'Permite comércio de recursos com outras facções (em breve).',
+    requiresResearch: null,
+  },
+  MERCADO_MILITAR: {
+    kind: 'MERCADO_MILITAR',
+    label: 'Mercado militar',
+    icon: '🎖️',
+    sector: 'COMERCIAL',
+    prodCost: 200,
+    moneyCost: 4000,
+    maxPerTile: 1,
+    maxPerFaction: 1,
+    description: 'Permite comprar tropas e armas de outras facções (em breve).',
+    requiresResearch: null,
+  },
+};
+
+export const CONSTRUCTION_LIST: ConstructionType[] = Object.values(CONSTRUCTIONS);
+
+// ===== Constantes de produção =====
+
+/** Comida-base de uma fazenda. */
+export const FARM_FOOD = 5;
+/** Multiplicador de uma fazenda num tile de Terras Agrícolas. */
+export const FARMLAND_MULTIPLIER = 3;
+/** Comida-base de um pasto. */
+export const PASTURE_FOOD = 5;
+/** Comida extra de um pasto de porcos. */
+export const PASTURE_PORCO_BONUS = 2;
+/** Produtos (couro/lã) que um pasto de gado/ovelha rende por turno. */
+export const PASTURE_PRODUCT_OUTPUT = 2;
+/** Aumento de capacidade de comida por celeiro. */
+export const GRANARY_CAPACITY_BONUS = 0.2;
+/** Recurso minerado por turno — minerais comuns e raros. */
+export const MINE_NORMAL_OUTPUT = 3;
+export const MINE_RARE_OUTPUT = 1;
+/** Custo de uma mina num tile de recurso raro. */
+export const MINE_RARE_COST = { prodCost: 2000, moneyCost: 15000 };
+
+/** Variantes do pasto, para a interface. */
+export const PASTURE_VARIANTS: {
+  id: PastureVariant;
+  label: string;
+  icon: string;
+  effect: string;
+}[] = [
+  { id: 'GADO', label: 'Gado', icon: '🐄', effect: '+2 de couro por turno' },
+  { id: 'OVELHA', label: 'Ovelha', icon: '🐑', effect: '+2 de lã por turno' },
+  { id: 'PORCO', label: 'Porco', icon: '🐖', effect: '+2 de comida por turno' },
+];
+
+// ===== Armazenamento de recursos =====
+
+/** Capacidade-base de estoque de cada recurso (sem armazéns). */
+export const RESOURCE_STORAGE: Record<string, number> = {
+  [ResourceType.FERRO]: 30,
+  [ResourceType.CARVAO]: 30,
+  [ResourceType.BAUXITA]: 30,
+  [ResourceType.COBRE]: 30,
+  [ResourceType.NIOBIO]: 10,
+  [ResourceType.URANIO]: 10,
+  [ResourceType.PRATA]: 10,
+  [ResourceType.OURO]: 10,
+  [ResourceType.PETROLEO]: 15,
+  [ResourceType.MADEIRA]: 40,
+  COURO: 30,
+  LA: 30,
+};
+
+/** Aumento de capacidade por armazém. */
+export const ARMAZEM_BONUS = 0.5;
+
+/** `true` se o Armazém aumenta a capacidade desse recurso (não couro/lã). */
+export function armazemAffects(resource: string): boolean {
+  return resource !== 'COURO' && resource !== 'LA';
+}
+
+/** Capacidade de estoque de um recurso numa cidade, contando os armazéns. */
+export function resourceCapacity(resource: string, armazens: number): number {
+  const base = RESOURCE_STORAGE[resource] ?? 30;
+  if (!armazemAffects(resource)) return base;
+  return Math.round(base * (1 + ARMAZEM_BONUS * armazens));
+}
+
+// ===== Produtos (recursos não-minerais do inventário) =====
+
+/** Produtos do rebanho — guardados no inventário da cidade junto dos minerais. */
+export type Product = 'COURO' | 'LA';
+
+export const PRODUCTS: Record<Product, { label: string; icon: string }> = {
+  COURO: { label: 'Couro', icon: '🟫' },
+  LA: { label: 'Lã', icon: '🧶' },
+};
+
+/** Rótulo e ícone de um item do inventário da cidade (mineral ou produto). */
+export function resourceLabel(key: string): { label: string; icon: string } {
+  if (key in PRODUCTS) return PRODUCTS[key as Product];
+  const info = resourceInfo(key as ResourceType);
+  return { label: info.label, icon: info.icon };
+}
+
+// ===== Helpers de cálculo =====
+
+/** `true` se o recurso do tile pode ser minerado (exclui madeira e terras). */
+export function isMineable(resource: ResourceType): boolean {
+  return (
+    resource !== ResourceType.MADEIRA &&
+    resource !== ResourceType.TERRAS_AGRICOLAS
+  );
+}
+
+/** `true` se a construção é proibida para um direcionamento político. */
+export function isConstructionForbidden(
+  kind: ConstructionKind,
+  alignment: AlignmentId,
+): boolean {
+  return CONSTRUCTIONS[kind].forbidden?.includes(alignment) ?? false;
+}
+
+/**
+ * Custo de produção e dinheiro de uma construção. Varia com o tile (mina em
+ * recurso raro) e com o direcionamento (área urbana e zona comercial são de
+ * graça em dinheiro nos estados independentes, mas custam mais produção).
+ */
+export function constructionCost(
+  kind: ConstructionKind,
+  alignment: AlignmentId,
+  resource?: ResourceType,
+): { prodCost: number; moneyCost: number } {
+  if (kind === 'MINA' && resource && resourceInfo(resource).tier === 'RARO') {
+    return { ...MINE_RARE_COST };
+  }
+  if (kind === 'AREA_URBANA' && alignment === 'INDEPENDENTE') {
+    return { prodCost: 1600, moneyCost: 0 };
+  }
+  if (kind === 'ZONA_COMERCIAL' && alignment === 'INDEPENDENTE') {
+    return { prodCost: 1200, moneyCost: 0 };
+  }
+  const c = CONSTRUCTIONS[kind];
+  return { prodCost: c.prodCost, moneyCost: c.moneyCost };
+}
+
+/** Aumento de teto de população de uma construção, conforme o direcionamento. */
+export function constructionPopCap(
+  kind: ConstructionKind,
+  alignment: AlignmentId,
+): number {
+  if (kind === 'CONJUNTO') return alignment === 'COMUNISTA' ? 750_000 : 500_000;
+  if (kind === 'AREA_URBANA') {
+    return alignment === 'INDEPENDENTE' ? 800_000 : 500_000;
+  }
+  return CONSTRUCTIONS[kind].popCap ?? 0;
+}
+
+/** Limite por tile de uma construção, conforme o direcionamento. */
+export function constructionMaxPerTile(
+  kind: ConstructionKind,
+  alignment: AlignmentId,
+): number {
+  if (kind === 'CONJUNTO' && alignment === 'COMUNISTA') return 4;
+  return CONSTRUCTIONS[kind].maxPerTile;
+}
+
+/** Dinheiro por turno de uma construção, conforme o direcionamento. */
+export function constructionMoneyPerTurn(
+  kind: ConstructionKind,
+  alignment: AlignmentId,
+): number {
+  if (kind === 'ZONA_COMERCIAL') {
+    return alignment === 'INDEPENDENTE' ? 1700 : 1250;
+  }
+  return CONSTRUCTIONS[kind].moneyPerTurn ?? 0;
+}
+
+/** Comida que uma fazenda rende num tile (×3 e bônus de clima em terras). */
+export function farmFood(province: {
+  resource: ResourceType;
+  climate: ClimateZone;
+  continent: string;
+}): number {
+  if (province.resource === ResourceType.TERRAS_AGRICOLAS) {
+    return Math.round(
+      FARM_FOOD *
+        FARMLAND_MULTIPLIER *
+        resourceBoost(province.resource, province.climate, province.continent),
+    );
+  }
+  return FARM_FOOD;
+}
+
+/** Comida que um pasto rende (porco dá comida extra). */
+export function pastureFood(variant: PastureVariant | null): number {
+  return PASTURE_FOOD + (variant === 'PORCO' ? PASTURE_PORCO_BONUS : 0);
+}
+
+/** Recurso minerado por turno por uma mina no tile dado. */
+export function mineOutput(resource: ResourceType): number {
+  return resourceInfo(resource).tier === 'RARO'
+    ? MINE_RARE_OUTPUT
+    : MINE_NORMAL_OUTPUT;
+}
+
+// ===== Construções erguidas =====
+
+/** Uma construção já erguida num tile. */
+export interface Construction {
+  id: number;
+  x: number;
+  y: number;
+  /** Cidade a que a construção pertence (recebe a sua produção). */
+  cityX: number;
+  cityY: number;
+  ownerCode: string;
+  kind: ConstructionKind;
+  /** Variante do pasto, ou `null`. */
+  variant: PastureVariant | null;
+}
+
+interface ConstructionRow {
+  id: number;
+  x: number;
+  y: number;
+  city_x: number;
+  city_y: number;
+  owner_code: string;
+  kind: string;
+  variant: string | null;
+}
+
+function rowToConstruction(r: ConstructionRow): Construction {
+  return {
+    id: r.id,
+    x: r.x,
+    y: r.y,
+    cityX: r.city_x,
+    cityY: r.city_y,
+    ownerCode: r.owner_code,
+    kind: r.kind as ConstructionKind,
+    variant: (r.variant as PastureVariant | null) ?? null,
+  };
+}
+
+/** Carrega as construções erguidas de uma partida. */
+export async function loadConstructions(
+  saveId: number,
+): Promise<Construction[]> {
+  const db = await getDb();
+  const rows = await db.select<ConstructionRow[]>(
+    'SELECT * FROM constructions WHERE save_id = ? ORDER BY id',
+    [saveId],
+  );
+  return rows.map(rowToConstruction);
+}
+
+// ===== Fila de construção =====
+
+/** Uma ordem na fila de construção de uma cidade. */
+export interface ConstructionOrder {
+  id: number;
+  /** Cidade dona da fila. */
+  cityX: number;
+  cityY: number;
+  /** Tile onde a construção será erguida. */
+  targetX: number;
+  targetY: number;
+  ownerCode: string;
+  kind: ConstructionKind;
+  variant: PastureVariant | null;
+  prodCost: number;
+  prodDone: number;
+  /** Dinheiro pago ao enfileirar (devolvido se cancelada). */
+  moneyCost: number;
+}
+
+interface ConstructionOrderRow {
+  id: number;
+  save_id: number;
+  city_x: number;
+  city_y: number;
+  target_x: number;
+  target_y: number;
+  owner_code: string;
+  kind: string;
+  variant: string | null;
+  prod_cost: number;
+  prod_done: number;
+  money_cost: number;
+}
+
+function rowToOrder(r: ConstructionOrderRow): ConstructionOrder {
+  return {
+    id: r.id,
+    cityX: r.city_x,
+    cityY: r.city_y,
+    targetX: r.target_x,
+    targetY: r.target_y,
+    ownerCode: r.owner_code,
+    kind: r.kind as ConstructionKind,
+    variant: (r.variant as PastureVariant | null) ?? null,
+    prodCost: r.prod_cost,
+    prodDone: r.prod_done,
+    moneyCost: r.money_cost ?? 0,
+  };
+}
+
+/** Carrega as ordens de construção de uma partida (em ordem de fila). */
+export async function loadConstructionOrders(
+  saveId: number,
+): Promise<ConstructionOrder[]> {
+  const db = await getDb();
+  const rows = await db.select<ConstructionOrderRow[]>(
+    'SELECT * FROM construction_orders WHERE save_id = ? ORDER BY id',
+    [saveId],
+  );
+  return rows.map(rowToOrder);
+}
+
+/**
+ * Quantas construções de um tipo um tile já tem — contando as **erguidas** e
+ * as que estão **na fila**. Usado para respeitar o limite por tile.
+ */
+export async function constructionsOnTile(
+  saveId: number,
+  x: number,
+  y: number,
+  kind: ConstructionKind,
+): Promise<number> {
+  const db = await getDb();
+  const built = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM constructions WHERE save_id = ? AND x = ? AND y = ? AND kind = ?',
+    [saveId, x, y, kind],
+  );
+  const queued = await db.select<{ n: number }[]>(
+    `SELECT COUNT(*) AS n FROM construction_orders
+      WHERE save_id = ? AND target_x = ? AND target_y = ? AND kind = ?`,
+    [saveId, x, y, kind],
+  );
+  return (built[0]?.n ?? 0) + (queued[0]?.n ?? 0);
+}
+
+/** Quantas construções de um tipo uma facção já tem (erguidas + na fila). */
+export async function constructionsOfFaction(
+  saveId: number,
+  ownerCode: string,
+  kind: ConstructionKind,
+): Promise<number> {
+  const db = await getDb();
+  const built = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM constructions WHERE save_id = ? AND owner_code = ? AND kind = ?',
+    [saveId, ownerCode, kind],
+  );
+  const queued = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM construction_orders WHERE save_id = ? AND owner_code = ? AND kind = ?',
+    [saveId, ownerCode, kind],
+  );
+  return (built[0]?.n ?? 0) + (queued[0]?.n ?? 0);
+}
+
+/**
+ * Define (ou troca) o setor de um tile. Só é possível trocar o setor de um
+ * tile que **não tem construções** nem ordens de construção pendentes.
+ */
+export async function assignSector(
+  saveId: number,
+  x: number,
+  y: number,
+  sector: Sector | null,
+): Promise<void> {
+  const db = await getDb();
+  const built = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM constructions WHERE save_id = ? AND x = ? AND y = ?',
+    [saveId, x, y],
+  );
+  const queued = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM construction_orders WHERE save_id = ? AND target_x = ? AND target_y = ?',
+    [saveId, x, y],
+  );
+  if ((built[0]?.n ?? 0) + (queued[0]?.n ?? 0) > 0) {
+    throw new Error(
+      'Não dá para trocar o setor de um tile que já tem construções.',
+    );
+  }
+  await db.execute(
+    'UPDATE provinces SET sector = ? WHERE save_id = ? AND x = ? AND y = ?',
+    [sector, saveId, x, y],
+  );
+}
+
+/**
+ * Enfileira uma construção na fila de uma cidade. Cobra o **dinheiro** da
+ * facção na hora; a **produção** é gasta turno a turno. Valida o limite por
+ * tile, o limite por facção, a construção pré-requisito e os direcionamentos
+ * proibidos.
+ */
+export async function queueConstruction(
+  saveId: number,
+  ownerCode: string,
+  alignment: AlignmentId,
+  cityX: number,
+  cityY: number,
+  targetX: number,
+  targetY: number,
+  kind: ConstructionKind,
+  variant: PastureVariant | null,
+  resource?: ResourceType,
+): Promise<void> {
+  const db = await getDb();
+  const def = CONSTRUCTIONS[kind];
+  const cost = constructionCost(kind, alignment, resource);
+
+  if (isConstructionForbidden(kind, alignment)) {
+    throw new Error(`${def.label} não é permitida pelo seu direcionamento.`);
+  }
+  if (def.requires) {
+    const have = await constructionsOfFaction(saveId, ownerCode, def.requires);
+    if (have === 0) {
+      throw new Error(
+        `${def.label} exige antes: ${CONSTRUCTIONS[def.requires].label}.`,
+      );
+    }
+  }
+  if (def.maxPerFaction != null) {
+    const have = await constructionsOfFaction(saveId, ownerCode, kind);
+    if (have >= def.maxPerFaction) {
+      throw new Error(
+        `A facção só pode ter ${def.maxPerFaction} ${def.label.toLowerCase()}.`,
+      );
+    }
+  }
+  const onTile = await constructionsOnTile(saveId, targetX, targetY, kind);
+  const tileLimit = constructionMaxPerTile(kind, alignment);
+  if (onTile >= tileLimit) {
+    throw new Error(
+      `Este tile já atingiu o limite de ${def.label.toLowerCase()} (${tileLimit}).`,
+    );
+  }
+
+  const rows = await db.select<{ money: number }[]>(
+    'SELECT money FROM factions WHERE save_id = ? AND code = ?',
+    [saveId, ownerCode],
+  );
+  if (!rows[0] || rows[0].money < cost.moneyCost) {
+    throw new Error(`Dinheiro insuficiente (${cost.moneyCost}).`);
+  }
+
+  await db.execute('BEGIN');
+  try {
+    if (cost.moneyCost > 0) {
+      await db.execute(
+        'UPDATE factions SET money = money - ? WHERE save_id = ? AND code = ?',
+        [cost.moneyCost, saveId, ownerCode],
+      );
+    }
+    await db.execute(
+      `INSERT INTO construction_orders
+         (save_id, city_x, city_y, target_x, target_y, owner_code, kind,
+          variant, prod_cost, prod_done, money_cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      [
+        saveId,
+        cityX,
+        cityY,
+        targetX,
+        targetY,
+        ownerCode,
+        kind,
+        variant,
+        cost.prodCost,
+        cost.moneyCost,
+      ],
+    );
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+}
+
+/** Cancela uma ordem de construção e devolve o dinheiro pago. */
+export async function cancelConstruction(orderId: number): Promise<void> {
+  const db = await getDb();
+  const rows = await db.select<ConstructionOrderRow[]>(
+    'SELECT * FROM construction_orders WHERE id = ?',
+    [orderId],
+  );
+  const o = rows[0];
+  if (!o) return;
+  await db.execute('BEGIN');
+  try {
+    if ((o.money_cost ?? 0) > 0) {
+      await db.execute(
+        'UPDATE factions SET money = money + ? WHERE save_id = ? AND code = ?',
+        [o.money_cost, o.save_id, o.owner_code],
+      );
+    }
+    await db.execute('DELETE FROM construction_orders WHERE id = ?', [orderId]);
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+}

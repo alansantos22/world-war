@@ -148,7 +148,7 @@ export const TROOP_TYPES: Record<TroopKind, TroopType> = {
     // Vida = 50% da vida do comandante (comandante = 100).
     hp: 50,
     moneyCost: 200,
-    manpowerCost: 250,
+    manpowerCost: 500,
     productionCost: 50,
     upkeep: 10,
   },

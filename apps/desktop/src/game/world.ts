@@ -12,6 +12,12 @@ import {
   FactionState,
   STARTING_FACTION,
   TerritoryProduction,
+  cityTaxIncome,
+  clampTax,
+  areaBonus,
+  FACTORY_BY_ALIGNMENT,
+  ALIGNMENT_ECONOMY,
+  type TaxLevel,
 } from './economy';
 import { ClimateZone } from './climate';
 import {
@@ -29,15 +35,32 @@ import {
 import {
   cityFoodConsumption,
   cityFoodProduction,
+  cityFoodCapacity,
   cityManpower,
-  cityStorage,
+  cityPopCap,
   loadCities,
+  loadCityResources,
   CAPITAL_START_FOOD,
   CAPITAL_START_POP,
   DISCONNECT_FOOD_PENALTY,
   STARVATION_LOSS,
   type City,
 } from './cities';
+import {
+  loadConstructions,
+  loadConstructionOrders,
+  CONSTRUCTIONS,
+  PASTURE_PRODUCT_OUTPUT,
+  constructionPopCap,
+  constructionMoneyPerTurn,
+  resourceCapacity,
+  farmFood,
+  pastureFood,
+  mineOutput,
+  type Sector,
+  type Construction,
+  type ConstructionOrder,
+} from './constructions';
 
 /** Uma província do mapa já persistida (1 célula de terra, com id do banco). */
 export interface Province extends TerritoryProduction {
@@ -62,6 +85,8 @@ export interface Province extends TerritoryProduction {
   defenderHp: number;
   /** `true` se o território foi tomado de outra facção (não neutro). */
   conquered: boolean;
+  /** Setor em que o tile foi especializado, ou `null` (ver `constructions.ts`). */
+  sector: Sector | null;
 }
 
 interface ProvinceRow {
@@ -83,6 +108,7 @@ interface ProvinceRow {
   volcano: number;
   defender_hp: number;
   conquered: number;
+  sector: string | null;
 }
 
 interface FactionRow {
@@ -92,6 +118,7 @@ interface FactionRow {
   manpower: number;
   research_points: number;
   culture: number;
+  tax_level: string;
 }
 
 interface SaveRow {
@@ -191,7 +218,8 @@ export async function ensureSchema(): Promise<void> {
       influence       INTEGER NOT NULL,
       manpower        INTEGER NOT NULL,
       research_points INTEGER NOT NULL,
-      culture         INTEGER NOT NULL DEFAULT 0
+      culture         INTEGER NOT NULL DEFAULT 0,
+      tax_level       TEXT    NOT NULL DEFAULT 'MEDIO'
     )
   `);
   // Migração: a coluna de cultura (facções anteriores a esse valor).
@@ -201,6 +229,12 @@ export async function ensureSchema(): Promise<void> {
   if (!factionCols.some((c) => c.name === 'culture')) {
     await db.execute(
       'ALTER TABLE factions ADD COLUMN culture INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+  // Migração: a coluna de nível de imposto.
+  if (!factionCols.some((c) => c.name === 'tax_level')) {
+    await db.execute(
+      "ALTER TABLE factions ADD COLUMN tax_level TEXT NOT NULL DEFAULT 'MEDIO'",
     );
   }
 
@@ -342,6 +376,60 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
+  // Construções erguidas nos tiles da zona de influência das cidades.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS constructions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      x          INTEGER NOT NULL,
+      y          INTEGER NOT NULL,
+      city_x     INTEGER NOT NULL,
+      city_y     INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      kind       TEXT    NOT NULL,
+      variant    TEXT
+    )
+  `);
+
+  // Fila de construção — uma fila por cidade, paralela à de tropas/colonos.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS construction_orders (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      city_x     INTEGER NOT NULL,
+      city_y     INTEGER NOT NULL,
+      target_x   INTEGER NOT NULL,
+      target_y   INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      kind       TEXT    NOT NULL,
+      variant    TEXT,
+      prod_cost  INTEGER NOT NULL,
+      prod_done  INTEGER NOT NULL DEFAULT 0,
+      money_cost INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  // Migração: a coluna do dinheiro pago (devolvido ao cancelar).
+  const coCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(construction_orders)',
+  );
+  if (!coCols.some((c) => c.name === 'money_cost')) {
+    await db.execute(
+      'ALTER TABLE construction_orders ADD COLUMN money_cost INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+
+  // Inventário de recursos das cidades (minerais minerados e produtos).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS city_resources (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id  INTEGER NOT NULL,
+      x        INTEGER NOT NULL,
+      y        INTEGER NOT NULL,
+      resource TEXT    NOT NULL,
+      amount   INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
   const cols = await db.select<{ name: string }[]>(
     'PRAGMA table_info(provinces)',
   );
@@ -366,7 +454,8 @@ export async function ensureSchema(): Promise<void> {
         seismic       INTEGER NOT NULL DEFAULT 0,
         volcano       INTEGER NOT NULL DEFAULT 0,
         defender_hp   INTEGER NOT NULL DEFAULT 0,
-        conquered     INTEGER NOT NULL DEFAULT 0
+        conquered     INTEGER NOT NULL DEFAULT 0,
+        sector        TEXT
       )
     `);
   } else if (!cols.some((c) => c.name === 'save_id')) {
@@ -414,6 +503,14 @@ export async function ensureSchema(): Promise<void> {
       "ALTER TABLE provinces ADD COLUMN climate TEXT NOT NULL DEFAULT 'AMENO'",
     );
   }
+  // Migração: a coluna do setor do tile (especialização para construções).
+  if (!haveProvCol.has('sector')) {
+    await db.execute('ALTER TABLE provinces ADD COLUMN sector TEXT');
+  }
+  // Migração: o setor residencial foi renomeado para urbano.
+  await db.execute(
+    "UPDATE provinces SET sector = 'URBANO' WHERE sector = 'RESIDENCIAL'",
+  );
 }
 
 function rowToProvince(r: ProvinceRow): Province {
@@ -436,6 +533,7 @@ function rowToProvince(r: ProvinceRow): Province {
     volcano: r.volcano === 1,
     defenderHp: r.defender_hp,
     conquered: r.conquered === 1,
+    sector: (r.sector as Sector | null) ?? null,
   };
 }
 
@@ -447,6 +545,7 @@ function rowToFaction(r: FactionRow): FactionState {
     manpower: r.manpower,
     researchPoints: r.research_points,
     culture: r.culture,
+    taxLevel: (r.tax_level as TaxLevel) ?? 'MEDIO',
   };
 }
 
@@ -515,8 +614,9 @@ async function insertFactions(saveId: number, codes: string[]): Promise<void> {
   for (const code of codes) {
     await db.execute(
       `INSERT INTO factions
-         (save_id, code, money, influence, manpower, research_points, culture)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (save_id, code, money, influence, manpower, research_points, culture,
+          tax_level)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         saveId,
         code,
@@ -525,6 +625,7 @@ async function insertFactions(saveId: number, codes: string[]): Promise<void> {
         s.manpower,
         s.researchPoints,
         s.culture,
+        s.taxLevel,
       ],
     );
   }
@@ -736,6 +837,20 @@ export async function loadFactions(saveId: number): Promise<FactionState[]> {
   return rows.map(rowToFaction);
 }
 
+/** Define o nível de imposto de uma facção. */
+export async function setTaxLevel(
+  saveId: number,
+  code: string,
+  level: TaxLevel,
+): Promise<void> {
+  await ensureSchema();
+  const db = await getDb();
+  await db.execute(
+    'UPDATE factions SET tax_level = ? WHERE save_id = ? AND code = ?',
+    [level, saveId, code],
+  );
+}
+
 /** Apaga o mapa da partida e gera um novo (botão "Novo mapa"). */
 export async function regenerateMap(saveId: number): Promise<Province[]> {
   await ensureSchema();
@@ -751,9 +866,12 @@ export async function regenerateMap(saveId: number): Promise<Province[]> {
   await db.execute('DELETE FROM battle_logs WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM city_troops WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM squads WHERE save_id = ?', [saveId]);
-  // As cidades e os esquadrões de colonos também ficavam sobre o mapa antigo.
+  // As cidades, colonos e construções também ficavam sobre o mapa antigo.
   await db.execute('DELETE FROM cities WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM settler_squads WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM constructions WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM construction_orders WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM city_resources WHERE save_id = ?', [saveId]);
   const map = generateMap(buildSeeds(save.customNation?.continent ?? null));
   await insertProvinces(saveId, map.provinces);
   // As facções são mantidas no "Novo mapa", então as capitais são semeadas
@@ -877,9 +995,194 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     upkeep.set(r.owner_code, (upkeep.get(r.owner_code) ?? 0) + cost);
   }
 
-  // Processa a fila de recrutamento: a produção de cada cidade avança a
-  // primeira ordem da sua fila; a tropa concluída entra no inventário da
-  // cidade (ver `city_troops`).
+  // ===== Cidades, construções e economia =====
+  const cities = await loadCities(saveId);
+  const constructions = await loadConstructions(saveId);
+  const constructionOrders = await loadConstructionOrders(saveId);
+  const cityResources = await loadCityResources(saveId);
+  const factionByCode = new Map(factions.map((f) => [f.code, f]));
+
+  // Direcionamento político de cada facção (define economia e impostos).
+  const alignmentByCode = new Map<string, AlignmentId>();
+  for (const n of NATIONS) alignmentByCode.set(n.code, n.alignment);
+  if (save.customNation) {
+    alignmentByCode.set(save.customNation.code, save.customNation.alignment);
+  }
+  const alignOf = (code: string): AlignmentId =>
+    alignmentByCode.get(code) ?? 'INDEPENDENTE';
+
+  // Bônus de ganhos (Banco/Bolsa/Agência bancária) de cada facção.
+  const bonusByFaction = new Map<string, ReturnType<typeof areaBonus>>();
+  for (const f of factions) {
+    const fc = constructions.filter((x) => x.ownerCode === f.code);
+    bonusByFaction.set(
+      f.code,
+      areaBonus(
+        alignOf(f.code),
+        fc.some((x) => x.kind === 'BANCO'),
+        fc.some((x) => x.kind === 'BOLSA'),
+        fc.filter((x) => x.kind === 'AGENCIA_BANCARIA').length,
+      ),
+    );
+  }
+
+  // Construções agrupadas pela cidade dona (em ordem de construção).
+  const consByCity = new Map<string, Construction[]>();
+  for (const con of constructions) {
+    const k = `${con.cityX},${con.cityY}`;
+    const list = consByCity.get(k);
+    if (list) list.push(con);
+    else consByCity.set(k, [con]);
+  }
+
+  // Inventário de recursos atual de cada cidade e os tiles que já têm linha.
+  const invByCity = new Map<string, Map<string, number>>();
+  const existingResKeys = new Set<string>();
+  for (const r of cityResources) {
+    const k = `${r.x},${r.y}`;
+    let inv = invByCity.get(k);
+    if (!inv) {
+      inv = new Map<string, number>();
+      invByCity.set(k, inv);
+    }
+    inv.set(r.resource, r.amount);
+    existingResKeys.add(`${k},${r.resource}`);
+  }
+
+  // Pré-cálculo de cada cidade: produtividade, comida, dinheiro, cultura,
+  // teto de população e o estoque de recursos após coleta/consumo.
+  interface CityCalc {
+    effProduction: number;
+    foodProduction: number;
+    foodCapacity: number;
+    moneyGain: number;
+    cultureGain: number;
+    popCapBonus: number;
+    /** Recursos tocados (coletados/consumidos) → quantidade final no estoque. */
+    resourceFinal: Map<string, number>;
+  }
+  const cityCalc = new Map<string, CityCalc>();
+  for (const c of cities) {
+    const k = `${c.x},${c.y}`;
+    const align = alignOf(c.ownerCode);
+    const factory = FACTORY_BY_ALIGNMENT[align];
+    const econ = ALIGNMENT_ECONOMY[align];
+    const bonus = bonusByFaction.get(c.ownerCode) ?? {
+      commercial: 0,
+      industrial: 0,
+    };
+    const cons = consByCity.get(k) ?? [];
+    const cityProd = provByTile.get(k)?.production ?? 0;
+    const inv = invByCity.get(k) ?? new Map<string, number>();
+
+    let factories = 0;
+    let granaries = 0;
+    let armazens = 0;
+    let foodProduction = cityFoodProduction(c);
+    let cultureGain = 0;
+    let popCapBonus = 0;
+    let commercialMoney = 0;
+    const collected = new Map<string, number>();
+    for (const con of cons) {
+      const def = CONSTRUCTIONS[con.kind];
+      if (con.kind === 'FABRICA') factories++;
+      else if (con.kind === 'CELEIRO') granaries++;
+      else if (con.kind === 'ARMAZEM') armazens++;
+      else if (con.kind === 'FAZENDA') {
+        const prov = provByTile.get(`${con.x},${con.y}`);
+        if (prov) foodProduction += farmFood(prov);
+      } else if (con.kind === 'PASTO') {
+        foodProduction += pastureFood(con.variant);
+        if (con.variant === 'GADO') {
+          collected.set('COURO', (collected.get('COURO') ?? 0) + PASTURE_PRODUCT_OUTPUT);
+        } else if (con.variant === 'OVELHA') {
+          collected.set('LA', (collected.get('LA') ?? 0) + PASTURE_PRODUCT_OUTPUT);
+        }
+      } else if (con.kind === 'MINA') {
+        const prov = provByTile.get(`${con.x},${con.y}`);
+        if (prov) {
+          collected.set(
+            prov.resource,
+            (collected.get(prov.resource) ?? 0) + mineOutput(prov.resource),
+          );
+        }
+      } else if (def.collects) {
+        collected.set(
+          def.collects.resource,
+          (collected.get(def.collects.resource) ?? 0) + def.collects.amount,
+        );
+      }
+      if (con.kind === 'CONJUNTO' || con.kind === 'AREA_URBANA') {
+        popCapBonus += constructionPopCap(con.kind, align);
+      }
+      if (con.kind === 'MUSEU' || con.kind === 'TEATRO') {
+        cultureGain += def.culturePerTurn ?? 0;
+      }
+      commercialMoney += constructionMoneyPerTurn(con.kind, align);
+    }
+
+    // Coleta de recursos → estoque, respeitando os tetos (com os armazéns).
+    const resourceFinal = new Map<string, number>();
+    for (const [res, amt] of collected) {
+      const cap = resourceCapacity(res, armazens);
+      const final = Math.min(cap, (inv.get(res) ?? 0) + amt);
+      inv.set(res, final);
+      resourceFinal.set(res, final);
+    }
+    // Usinas consomem combustível do estoque e geram energia.
+    let energy = 0;
+    for (const con of cons) {
+      const def = CONSTRUCTIONS[con.kind];
+      if (!def.fuel || def.energyOutput == null) continue;
+      const have = inv.get(def.fuel.resource) ?? 0;
+      if (have >= def.fuel.amount) {
+        const left = have - def.fuel.amount;
+        inv.set(def.fuel.resource, left);
+        resourceFinal.set(def.fuel.resource, left);
+        energy += def.energyOutput;
+      }
+    }
+    // Consumidores de energia atendidos por ordem de construção.
+    for (const con of cons) {
+      const def = CONSTRUCTIONS[con.kind];
+      if (def.energyCost == null) continue;
+      if (energy >= def.energyCost) {
+        energy -= def.energyCost;
+        cultureGain += def.culturePerTurn ?? 0;
+      }
+    }
+
+    const effProduction = cityProd + factories * factory.productivity;
+    const foodCapacity = cityFoodCapacity(c, granaries);
+    const tax = clampTax(
+      factionByCode.get(c.ownerCode)?.taxLevel ?? 'MEDIO',
+      align,
+    );
+    const moneyGain =
+      cityTaxIncome(c.population, tax, align) +
+      Math.round(
+        factories * factory.money * econ.industrialMult * (1 + bonus.industrial),
+      ) +
+      Math.round(
+        commercialMoney * econ.commercialMult * (1 + bonus.commercial),
+      );
+
+    cityCalc.set(k, {
+      effProduction,
+      foodProduction,
+      foodCapacity,
+      moneyGain,
+      cultureGain,
+      popCapBonus,
+      resourceFinal,
+    });
+  }
+  /** Produção efetiva de uma cidade (província + zonas de fábrica). */
+  const effProdAt = (k: string): number =>
+    cityCalc.get(k)?.effProduction ?? provByTile.get(k)?.production ?? 0;
+
+  // Processa a fila de recrutamento (tropas/colonos) — uma por cidade. Avança
+  // a primeira ordem pela produção efetiva da cidade.
   const orders = await loadRecruitOrders(saveId);
   const frontByTile = new Map<string, RecruitOrder>();
   for (const o of orders) {
@@ -897,9 +1200,8 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   // Colonos concluídos viram (ou reforçam) um esquadrão de colonos no tile.
   const newColonos: { x: number; y: number; ownerCode: string }[] = [];
   for (const [k, front] of frontByTile) {
-    const prov = provByTile.get(k);
-    if (!prov) continue;
-    const done = front.prodDone + prov.production;
+    if (!provByTile.get(k)) continue;
+    const done = front.prodDone + effProdAt(k);
     if (done >= front.prodCost) {
       finishedOrders.push(front.id);
       if (front.kind === 'COLONO') {
@@ -917,8 +1219,42 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
   }
 
+  // Processa a fila de construção — uma por cidade, em paralelo à de tropas.
+  const cFrontByCity = new Map<string, ConstructionOrder>();
+  for (const o of constructionOrders) {
+    const k = `${o.cityX},${o.cityY}`;
+    if (!cFrontByCity.has(k)) cFrontByCity.set(k, o);
+  }
+  const cOrderProgress: { id: number; prodDone: number }[] = [];
+  const cFinished: number[] = [];
+  const newConstructions: {
+    x: number;
+    y: number;
+    cityX: number;
+    cityY: number;
+    ownerCode: string;
+    kind: string;
+    variant: string | null;
+  }[] = [];
+  for (const [k, front] of cFrontByCity) {
+    const done = front.prodDone + effProdAt(k);
+    if (done >= front.prodCost) {
+      cFinished.push(front.id);
+      newConstructions.push({
+        x: front.targetX,
+        y: front.targetY,
+        cityX: front.cityX,
+        cityY: front.cityY,
+        ownerCode: front.ownerCode,
+        kind: front.kind,
+        variant: front.variant,
+      });
+    } else {
+      cOrderProgress.push({ id: front.id, prodDone: done });
+    }
+  }
+
   // Ciclo de turno das cidades: comida, crescimento da população e manpower.
-  const cities = await loadCities(saveId);
   const ownedTilesByFaction = new Map<string, Set<string>>();
   for (const p of provinces) {
     if (!p.ownerCode) continue;
@@ -937,8 +1273,21 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   }[] = [];
   /** Manpower que as cidades concedem à facção neste turno (crescimento). */
   const cityManpowerGain = new Map<string, number>();
+  /** Dinheiro que as cidades rendem à facção neste turno. */
+  const cityMoneyGain = new Map<string, number>();
+  /** Cultura que as construções urbanas rendem à facção neste turno. */
+  const cityCultureGain = new Map<string, number>();
   for (const c of cities) {
-    const prod = cityFoodProduction(c);
+    const calc = cityCalc.get(`${c.x},${c.y}`)!;
+    cityMoneyGain.set(
+      c.ownerCode,
+      (cityMoneyGain.get(c.ownerCode) ?? 0) + calc.moneyGain,
+    );
+    cityCultureGain.set(
+      c.ownerCode,
+      (cityCultureGain.get(c.ownerCode) ?? 0) + calc.cultureGain,
+    );
+    const prod = calc.foodProduction;
     let cons = cityFoodConsumption(c.population);
     // Cidade comum sem conexão à facção paga +30% de comida.
     if (
@@ -947,7 +1296,7 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     ) {
       cons = Math.ceil(cons * DISCONNECT_FOOD_PENALTY);
     }
-    let food = Math.min(cityStorage(c), c.food + prod);
+    let food = Math.min(calc.foodCapacity, c.food + prod);
     let population = c.population;
     if (food >= cons) {
       food -= cons;
@@ -961,6 +1310,8 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       food = 0;
       population = Math.round(population * (1 - STARVATION_LOSS));
     }
+    // A população não cresce além do teto da cidade (+ conjuntos/áreas urbanas).
+    population = Math.min(cityPopCap(c) + calc.popCapBonus, population);
     // Manpower é uma catraca: 1% da população, e só sobe quando ela cresce.
     let manpowerCap = c.manpowerCap;
     const newCap = cityManpower(population);
@@ -1010,15 +1361,20 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       const g = gain.get(f.code);
       const up = upkeep.get(f.code) ?? 0;
       const mpGain = cityManpowerGain.get(f.code) ?? 0;
-      if (!g && !up && !mpGain) continue;
+      const income = cityMoneyGain.get(f.code) ?? 0;
+      const cultureGain = cityCultureGain.get(f.code) ?? 0;
+      if (!g && !up && !mpGain && !income && !cultureGain) continue;
       if (g) {
         f.researchPoints += g.research;
         f.culture += g.culture;
       }
+      // Cultura das construções urbanas (museu, teatro, rádio, TV).
+      f.culture += cultureGain;
       // Manpower vem do crescimento das cidades (1% da nova população).
       f.manpower += mpGain;
-      // O dinheiro não pode ficar negativo: a manutenção é limitada ao caixa.
-      if (up) f.money = Math.max(0, f.money - up);
+      // Renda das cidades (imposto + fábricas) menos a manutenção; o dinheiro
+      // não pode ficar negativo.
+      f.money = Math.max(0, f.money + income - up);
       await db.execute(
         `UPDATE factions SET money = ?, manpower = ?, research_points = ?, culture = ?
          WHERE save_id = ? AND code = ?`,
@@ -1070,6 +1426,44 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
            VALUES (?, ?, ?, ?, 1, ?, 0)`,
           [saveId, c.ownerCode, c.x, c.y, turn],
         );
+      }
+    }
+    // Avança / conclui a fila de construção de cada cidade.
+    for (const u of cOrderProgress) {
+      await db.execute(
+        'UPDATE construction_orders SET prod_done = ? WHERE id = ?',
+        [u.prodDone, u.id],
+      );
+    }
+    for (const id of cFinished) {
+      await db.execute('DELETE FROM construction_orders WHERE id = ?', [id]);
+    }
+    for (const nc of newConstructions) {
+      await db.execute(
+        `INSERT INTO constructions
+           (save_id, x, y, city_x, city_y, owner_code, kind, variant)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [saveId, nc.x, nc.y, nc.cityX, nc.cityY, nc.ownerCode, nc.kind, nc.variant],
+      );
+    }
+    // Grava o estoque de recursos das cidades após coleta e consumo.
+    for (const c of cities) {
+      const finalMap = cityCalc.get(`${c.x},${c.y}`)?.resourceFinal;
+      if (!finalMap || finalMap.size === 0) continue;
+      for (const [resource, amount] of finalMap) {
+        if (existingResKeys.has(`${c.x},${c.y},${resource}`)) {
+          await db.execute(
+            `UPDATE city_resources SET amount = ?
+              WHERE save_id = ? AND x = ? AND y = ? AND resource = ?`,
+            [amount, saveId, c.x, c.y, resource],
+          );
+        } else if (amount > 0) {
+          await db.execute(
+            `INSERT INTO city_resources (save_id, x, y, resource, amount)
+             VALUES (?, ?, ?, ?, ?)`,
+            [saveId, c.x, c.y, resource, amount],
+          );
+        }
       }
     }
     // Recupera a vida dos esquadrões em território próprio.

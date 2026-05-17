@@ -9,6 +9,7 @@ export enum ResourceType {
   // Comuns
   MADEIRA = 'MADEIRA',
   FERRO = 'FERRO',
+  CARVAO = 'CARVAO',
   BAUXITA = 'BAUXITA',
   COBRE = 'COBRE',
   TERRAS_AGRICOLAS = 'TERRAS_AGRICOLAS',

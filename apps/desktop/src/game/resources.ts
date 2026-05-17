@@ -86,6 +86,15 @@ export const RESOURCES: Record<ResourceType, ResourceInfo> = {
     icon: '⛓️',
     effect: 'Matéria-prima essencial para a produção de armas.',
   },
+  [ResourceType.CARVAO]: {
+    key: ResourceType.CARVAO,
+    label: 'Carvão',
+    tier: 'COMUM',
+    rarityRank: 17,
+    color: '#2c2f36',
+    icon: '⚫',
+    effect: 'Combustível para usinas de energia a carvão.',
+  },
   [ResourceType.BAUXITA]: {
     key: ResourceType.BAUXITA,
     label: 'Bauxita',

@@ -73,7 +73,7 @@ Cada província tem **1 recurso** (catálogo em
 [`src/game/resources.ts`](src/game/resources.ts)):
 
 - **Raros:** Nióbio, Urânio, Prata, Ouro, Petróleo.
-- **Comuns:** Madeira, Ferro, Bauxita, Cobre, Terras Agrícolas.
+- **Comuns:** Madeira, Ferro, Carvão, Bauxita, Cobre, Terras Agrícolas.
 
 Os recursos raros são posicionados com *farthest-point sampling* (cada raro é
 colocado o mais longe possível dos raros já posicionados), garantindo que
@@ -298,6 +298,7 @@ Cada província pertence a uma partida (`save_id`).
 | `volcano`       | INTEGER | 1 se há um vulcão na província.         |
 | `defender_hp`   | INTEGER | Vida somada das tropas que defendem o território neutro. |
 | `conquered`     | INTEGER | 1 se o território foi tomado de outra facção. |
+| `sector`        | TEXT    | Setor em que o tile foi especializado, ou nulo (seção 13). |
 
 ### Tabela `factions`
 
@@ -314,6 +315,7 @@ personalizada).
 | `manpower`        | INTEGER | Manpower.                              |
 | `research_points` | INTEGER | Pontos de pesquisa.                    |
 | `culture`         | INTEGER | Cultura.                               |
+| `tax_level`       | TEXT    | Nível de imposto cobrado (seção 13).   |
 
 ### Tabela `squads`
 
@@ -425,6 +427,49 @@ Uma linha por **esquadrão de colonos** no mapa (ver seção 12).
 | `created_turn`    | INTEGER | Turno em que foi criado (pronto no seguinte). |
 | `last_moved_turn` | INTEGER | Último turno em que se moveu.              |
 
+### Tabela `constructions`
+
+Uma linha por **construção erguida** num tile (ver seção 13).
+
+| Coluna       | Tipo    | Descrição                                       |
+|--------------|---------|-------------------------------------------------|
+| `id`         | INTEGER | Chave primária.                                 |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
+| `x`, `y`     | INTEGER | Tile onde a construção foi erguida.             |
+| `city_x`, `city_y` | INTEGER | Cidade que recebe a produção da construção. |
+| `owner_code` | TEXT    | Facção dona.                                    |
+| `kind`       | TEXT    | Tipo (`FAZENDA`, `CELEIRO`, `PASTO`, `MINA`, `FABRICA`). |
+| `variant`    | TEXT    | Rebanho do pasto (`GADO`/`OVELHA`/`PORCO`), ou nulo. |
+
+### Tabela `construction_orders`
+
+Uma linha por **construção na fila** de uma cidade (ver seção 13).
+
+| Coluna              | Tipo    | Descrição                                  |
+|---------------------|---------|--------------------------------------------|
+| `id`                | INTEGER | Chave primária (também a ordem na fila).   |
+| `save_id`           | INTEGER | Partida (`saves.id`) a que pertence.       |
+| `city_x`, `city_y`  | INTEGER | Cidade dona da fila.                       |
+| `target_x`, `target_y` | INTEGER | Tile onde a construção será erguida.    |
+| `owner_code`        | TEXT    | Facção dona.                               |
+| `kind`              | TEXT    | Tipo da construção.                        |
+| `variant`           | TEXT    | Rebanho do pasto, ou nulo.                 |
+| `prod_cost`         | INTEGER | Produção necessária para concluir.         |
+| `prod_done`         | INTEGER | Produção já acumulada.                     |
+| `money_cost`        | INTEGER | Dinheiro pago (devolvido se cancelada).    |
+
+### Tabela `city_resources`
+
+Uma linha por **recurso no inventário de uma cidade** (ver seção 13).
+
+| Coluna     | Tipo    | Descrição                                         |
+|------------|---------|---------------------------------------------------|
+| `id`       | INTEGER | Chave primária.                                   |
+| `save_id`  | INTEGER | Partida (`saves.id`) a que pertence.              |
+| `x`, `y`   | INTEGER | Tile da cidade dona do inventário.                |
+| `resource` | TEXT    | Recurso (`ResourceType`) ou produto (`COURO`/`LA`). |
+| `amount`   | INTEGER | Quantidade acumulada.                             |
+
 Criar um novo jogo gera o mapa, grava as províncias, cria as facções e semeia
 uma **cidade em cada capital**; carregar uma partida lê tudo do seu `save_id`.
 "Novo mapa" apaga e regenera só o mapa da partida atual (as facções são
@@ -453,18 +498,20 @@ deixando o mapa livre.
   inicial).
 - **Barra lateral** (canto superior esquerdo) — uma lista vertical de botões
   arredondados, **só com ícones**, para as ações do jogo: **Nações** (🏴),
-  **Direcionamentos** (🎖️) e **Exército** (🪖), que abrem os seus painéis, e
-  **Novo mapa** (↻), **Salvar jogo** (💾), **Menu** (⏏) e **Tela cheia** (⛶).
-  O texto de cada ação aparece como dica ao passar o mouse.
+  **Direcionamentos** (🎖️), **Economia** (💰) e **Exército** (🪖), que abrem os
+  seus painéis, e **Novo mapa** (↻), **Salvar jogo** (💾), **Menu** (⏏) e
+  **Tela cheia** (⛶). O texto de cada ação aparece como dica ao passar o mouse.
 - **Painel da província** — aparece ao **clicar numa província**; mostra dono,
   direcionamento, recurso, **clima** (zona, hemisfério, estação, avisos de
   zona sísmica/vulcão) e a **produção por turno**. Lista os **esquadrões** e os
-  **esquadrões de colonos** do tile e, se o tile for uma **cidade** sua, traz
-  as ações da cidade (Montar esquadrão, Ver cidade). Fecha no `✕` ou ao clicar
-  no oceano.
+  **esquadrões de colonos** do tile; se o tile for uma **cidade** sua, traz as
+  ações da cidade (Montar esquadrão, Ver cidade); e, se for um tile da zona de
+  influência de uma cidade, traz a escolha de **setor** e as **construções**
+  (seção 13). Fecha no `✕` ou ao clicar no oceano.
 - **Painel lateral** (direita) — aberto pelos botões **Nações** (ranking de
-  territórios) ou **Direcionamentos** (os 4 blocos políticos). Só um painel
-  fica aberto por vez; o botão acende quando ativo.
+  territórios), **Direcionamentos** (os 4 blocos políticos) ou **Economia**
+  (imposto, felicidade e renda por turno). Só um painel fica aberto por vez; o
+  botão acende quando ativo.
 - **Painel da cidade** (direita) — aberto pelo botão **Ver cidade** do painel
   da província; só abre em **tiles de cidade**. Tem três abas (estilo
   *Civilization*): **Cidade** (população, comida, manpower, influência),
@@ -516,18 +563,21 @@ seção 11): 25 por esquadrão + 10 por tropa, e ainda as tropas do inventário 
 mas tudo que está **num tile da própria facção custa metade**. O dinheiro
 nunca fica negativo: se o caixa não cobre a manutenção, ele só chega a 0.
 
-A **fila de produção** de cada cidade avança: a **produção** da província é
-gasta no primeiro item da fila e, quando concluído, uma **tropa** entra no
-**inventário da cidade** ou um **colono** reforça um esquadrão de colonos no
-tile (ver seções 11 e 12).
+Cada cidade tem **duas filas** que avançam em paralelo, cada uma pela
+**produção efetiva** da cidade (produção da província + zonas de fábrica):
+
+- a **fila de produção** — tropas e colonos (seções 11 e 12);
+- a **fila de construção** — as construções da seção 13.
+
+Cada facção também recebe **dinheiro** das suas cidades: o imposto da
+população e as zonas de fábrica (ver seção 13). A renda é somada ao caixa, e
+em seguida a manutenção é descontada.
 
 Por fim, cada esquadrão parado em **território da própria facção** recupera
 **5 de vida** (comandante e cada tropa), e **todos os esquadrões recuperam os
 seus 2 ataques** do turno (ver seção 11).
 
-A **influência** ainda **não muda** por turno e o **dinheiro** ainda não tem
-uma fonte de *produção* (só a despesa da manutenção). Definir de onde vêm é um
-passo futuro.
+A **influência** ainda **não muda** por turno.
 
 O turno fica gravado na coluna `turn` da tabela `saves` e os valores das
 facções na tabela `factions`; avançar o turno também marca a partida como
@@ -729,7 +779,7 @@ As tropas nascem pelo **recrutamento**. A aba **Produção** do painel da cidade
 
 | Tropa      | Força | Vida | Dinheiro | Manpower | Produção | Manutenção |
 |------------|-------|------|----------|----------|----------|------------|
-| Infantaria | +10   | 50   | 200      | 250      | 50       | 10 / turno |
+| Infantaria | +10   | 50   | 200      | 500      | 50       | 10 / turno |
 
 A **vida** de uma tropa é **50% da vida do comandante** (comandante = 100 →
 infantaria = 50).
@@ -885,19 +935,25 @@ são **fundadas** por **colonos**.
 Cada cidade tem **população** e um estoque de **comida**:
 
 - **Capitais** nascem com **1.000.000** de habitantes e **10** de comida, e
-  **produzem 10 de comida por turno** (mínimo — fazendas aumentarão isso).
+  **produzem 10 de comida por turno** (mínimo).
 - **Cidades fundadas** nascem com **100 mil** de habitantes e **10** de comida
-  por colono do esquadrão; **ainda não produzem comida** (dependem de fazendas,
-  planejadas).
-- **Estoque de comida** — limitado: **200** numa capital, **100** numa cidade.
+  por colono do esquadrão; só produzem comida com **fazendas e pastos**
+  (seção 13).
+- **Estoque de comida** — limite-base de **200** numa capital, **100** numa
+  cidade; cada **celeiro** soma +20% (seção 13).
+- **Teto de população** — **2.500.000** numa cidade, **5.000.000** numa
+  capital; conjuntos habitacionais e áreas urbanas o aumentam (seção 13). A
+  população não cresce além do teto.
 
 ### Comida e população (por turno)
 
 - **Consumo:** 1 de comida por turno a cada **100 mil** de habitantes (1 milhão
   ⇒ 10 de comida).
-- A comida produzida entra no estoque; o consumo é pago do estoque.
+- A comida produzida (base da capital + fazendas + pastos) entra no estoque; o
+  consumo é pago do estoque.
 - **Crescimento:** se a produção supera o consumo, a população cresce **1% por
-  ponto de comida em excedente** (produz 15, consome 10 ⇒ +5%/turno).
+  ponto de comida em excedente** (produz 15, consome 10 ⇒ +5%/turno), até o
+  teto de população.
 - **Fome:** se o estoque acaba e a comida não cobre o consumo, a cidade perde
   **3% da população por turno** até a produção bastar — ou até a facção
   resolver o problema.
@@ -953,12 +1009,135 @@ o botão **🏛️ Fundar cidade**. O tile precisa estar a **pelo menos 2 tiles*
 
 > **Gaps futuros:** sistema de **revoltas** quando uma cidade não consegue
 > comida; **custo de lealdade** das cidades distantes; sistema de **leis** para
-> definir quanto da população pode virar manpower; **construções** (fazendas
-> etc.) na zona de influência.
+> definir quanto da população pode virar manpower.
 
 ---
 
-## 13. Estrutura do código
+## 13. Setores, construções e economia
+
+Os tiles da **zona de influência** de uma cidade podem ser **especializados**
+e receber **construções**. Definido em
+[`src/game/constructions.ts`](src/game/constructions.ts) e
+[`src/game/economy.ts`](src/game/economy.ts).
+
+> O catálogo já prevê o **sistema de pesquisa** futuro: cada construção tem o
+> campo `requiresResearch` (hoje sempre nulo — tudo destravado).
+
+### Setores
+
+Cada tile da zona de influência pode ser especializado num dos **6 setores**:
+**agrícola**, **industrial**, **urbano**, **comercial**, **religioso** e
+**militar**. Ao clicar num tile seu dentro da zona de influência, o botão
+**🏗️ Escolher especialização** abre o painel de especialização à direita.
+Atribuir um setor é grátis; só dá para trocar o setor de um tile **sem
+construções**. Hoje os setores **agrícola**, **industrial**, **urbano** e
+**comercial** têm construções; **religioso** e **militar** são selecionáveis,
+mas vazios (gap).
+
+### Construções
+
+As construções entram numa **fila de construção própria de cada cidade**,
+paralela à fila de tropas/colonos — as duas avançam por turno pela produção
+efetiva da cidade. O **dinheiro** é cobrado ao enfileirar; a **produção** é
+gasta turno a turno. Cada construção tem um **limite por tile** (algumas, um
+**limite por facção**); algumas são **proibidas** por direcionamento ou
+**exigem** outra construção.
+
+**Agrícola** — Fazenda (450/2.500, 1/tile, +5 de comida; ×3 e bônus de clima
+em Terras Agrícolas); Celeiro (350/1.000, 2/tile, +20% na capacidade de
+comida); Pasto (600/4.000, 1/tile, +5 de comida; gado→couro, ovelha→lã,
+porco→+2 de comida).
+
+**Industrial** — Mina (600/6.500 ou 2.000/15.000 para raros, 1/tile, extrai o
+mineral do tile, 3 ou 1/turno); Zona de fábricas (700/5.000, +produtividade e
+dinheiro por direcionamento); Armazém (500/3.500, 2/tile, +50% na capacidade
+de minérios/madeira/petróleo); Madeireira (600/4.000, 1/tile, coleta 2
+madeira/turno); Oleoduto (1.200/15.000, 1/tile, coleta 2 petróleo/turno);
+Usinas de energia — a carvão (1.000/11.000, 2 carvão → 10 energia), nuclear
+(4.000/45.000, 1 urânio → 45 energia) e de petróleo (1.500/24.000, 1 petróleo
+→ 20 energia).
+
+**Urbano** — Conjunto habitacional (900/12.000, 2/tile e 4 no comunismo,
++500 mil de teto de pop, +750 mil no comunismo); Área urbana (1.200/8.000,
++500 mil, +800 mil nos estados independentes — proibida no comunismo; nos
+independentes custa 0 $ e 1.600 de produção); Museu (250/4.500, +2 cultura);
+Teatro (230/3.000, +5 cultura); Centro policial (300/3.500) e Agência de
+propaganda (400/6.000 — proibida nos independentes) — ordem e lealdade *(gap)*;
+Emissora de rádio (400/2.500, +4 cultura, 1 energia) e de TV (500/4.500, +7
+cultura, 1 energia).
+
+**Comercial** — Mercado local (450/5.000, +500 $/turno); Shopping center
+(600/9.500, +900 $/turno — proibido no comunismo); Zona comercial (600/16.000,
++1.250 $/turno, +1.700 nos independentes — proibida no comunismo; nos
+independentes custa 0 $ e 1.200 de produção); Banco Nacional (650/30.000,
+1/facção, proibido nos independentes — +30%/+20% nas zonas comerciais); Bolsa
+de valores (500/50.000, 1/facção, proibida no comunismo — +15%/+30% nos ganhos
+comerciais e industriais); Agência bancária (150/8.000, +10% nos ganhos
+comerciais/industriais — exige o Banco Nacional); Mercado exterior
+(300/6.000, 1/facção) e Mercado militar (200/4.000, 1/facção) — comércio entre
+facções *(gap)*.
+
+A mina só pode ser erguida em tiles de **mineral** (exclui Madeira e Terras
+Agrícolas). Os minerais e produtos (couro, lã) vão para o **inventário de
+recursos da cidade**.
+
+### Energia e armazenamento
+
+A **energia** não é estocada: por turno, as **usinas** que têm combustível no
+inventário o consomem e geram pontos de energia; os edifícios que precisam de
+energia (rádio, TV) são atendidos **por ordem de construção** — quem fica sem
+energia não produz o seu efeito naquele turno.
+
+Cada recurso tem um **limite de estoque** na cidade: minérios comuns **30**,
+raros **10**, petróleo **15**, madeira **40**, manufaturados (couro/lã) **30**.
+Cada **Armazém** soma +50% à capacidade de minérios, madeira e petróleo.
+Recursos coletados acima do teto são perdidos.
+
+### Economia e impostos
+
+A facção cobra **impostos** da população: `1` de dinheiro a cada `250`
+habitantes (100 mil ⇒ 400). O **nível de imposto** é definido no painel
+**Economia** (💰), limitado pelo direcionamento:
+
+| Nível    | Multiplicador | Felicidade | Direcionamentos que permitem |
+|----------|---------------|------------|------------------------------|
+| Mínimo   | ×0,5          | +30        | todos                        |
+| Médio    | ×1,0          | +5         | repúblicas, império, comunistas |
+| Alto     | ×1,3          | −15        | império, comunistas          |
+| Extremamente alto | ×1,7 | −40        | comunistas                   |
+
+Modificadores de economia por **direcionamento**:
+
+- **Estados independentes** — +20% em zonas comerciais, +10% em industriais e
+  +10% em agrícolas.
+- **Comunistas** — empobrecimento: −60% nos impostos, −60% em zonas comerciais
+  e −50% em zonas industriais.
+- **Repúblicas** e **império** — sem buff/debuff (gap: **políticas e leis**
+  exclusivas).
+
+A **zona de fábricas** rende produtividade e dinheiro conforme o
+direcionamento: comunistas +15 / 0 $, império +12 / 0 $, repúblicas +8 /
++500 $, estados independentes +5 / +1.400 $.
+
+As construções financeiras dão **bônus de ganhos** à facção, somados por cima
+dos modificadores de direcionamento: o **Banco Nacional** reforça as zonas
+comerciais (+30% em império/república, +20% nos demais); a **Bolsa de valores**
+reforça comércio e indústria (+15%, ou +30% nos estados independentes); cada
+**Agência bancária** soma +10% a ambos.
+
+A **felicidade** (50 de base + o modificador do imposto) já é exibida, mas
+ainda **não afeta** o jogo — vai influenciar o crescimento da população
+futuramente (gap).
+
+> **Gaps futuros:** construções dos setores religioso e militar; sistemas de
+> **prosperidade**, **ordem**, **lealdade**, **relíquias** (sítios
+> arqueológicos) e **comércio entre facções** (mercado exterior/militar,
+> empréstimos do banco); políticas e leis por direcionamento; efeito da
+> felicidade no crescimento.
+
+---
+
+## 14. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -974,13 +1153,14 @@ apps/desktop/src/
     ├── enums.ts          ResourceType
     ├── flags.ts          geração do padrão das bandeiras
     ├── resources.ts      catálogo de recursos e bônus de clima
-    ├── economy.ts        valores da facção e produção do território
+    ├── economy.ts        valores da facção, impostos e economia
     ├── climate.ts        zonas de clima, hemisférios e estações
     ├── turns.ts          calendário dos turnos (data a partir do turno)
     ├── alignments.ts     os 4 direcionamentos políticos
     ├── nations.ts        as 13 nações
     ├── squads.ts         esquadrões, tropas, recrutamento e inventário
     ├── cities.ts         cidades, colonos e fundação de cidades
+    ├── constructions.ts  setores, construções e fila de construção
     ├── battle.ts         resolução de combate (dano, debuffs de ambiente)
     ├── map-generator.ts  geração procedural do mapa
     ├── world.ts          esquema SQLite, persistência e avanço de turno
@@ -989,16 +1169,16 @@ apps/desktop/src/
 
 ---
 
-## 14. Roteiro (próximos passos)
+## 15. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
 2. ~~**Turnos** — botão "Próximo turno" que avança o tempo.~~
    **Implementado** (seção 9): turnos semanais a partir de 01/01/1980.
-3. **Economia** — *parcial*: a cada turno as facções recebem **pesquisa** e
-   **cultura** das suas províncias e **manpower** das cidades (seções 9 e 12).
-   Falta dar uma fonte de produção ao **dinheiro** e à **influência**, e usar
-   "recurso local" (efeito dos recursos).
+3. **Economia** — *parcial*: as facções recebem **pesquisa** e **cultura** das
+   províncias, **manpower** das cidades e **dinheiro** de impostos e fábricas
+   (seções 9, 12 e 13). Falta uma fonte para a **influência** e o **uso dos
+   recursos** do inventário das cidades.
 4. **Eventos** — terremotos, erupções e eventos sazonais sobre o mapa de clima
    e placas tectônicas (seção 10), com **buffs e debuffs**.
 5. ~~**Esquadrões e batalha**~~ **Implementado** (seção 11): montar, mover e
@@ -1006,15 +1186,17 @@ apps/desktop/src/
    esquadrões e **tomar** territórios neutros (ocupar ou devastar).
 6. ~~**Cidades**~~ **Implementado** (seção 12): fundar cidades com colonos,
    população, comida, zona de influência e ciclo de turno.
-7. **Construções** — edifícios nos tiles da zona de influência das cidades
-   (fazendas que produzem comida e outros), com bônus de defesa e
-   buffs/debuffs que entram na conta da batalha (seções 11 e 12).
-8. **Conquista e defesa entre facções** — tomar territórios de outras nações;
+7. ~~**Setores, construções e economia**~~ **Implementado** (seção 13):
+   especializar tiles; construções dos setores agrícola, industrial, urbano e
+   comercial; energia; impostos. Faltam os setores religioso e militar.
+8. **Pesquisa** — pontos de pesquisa que destravam construções e melhorias
+   (o campo `requiresResearch` das construções já é o gancho — seção 13).
+9. **Conquista e defesa entre facções** — tomar territórios de outras nações;
    o contra-ataque do defensor; e a **defesa das cidades** — hoje as tropas no
    **inventário** ainda *não* defendem o tile (só os esquadrões estacionados),
    e isso vai mudar (ver seção 11).
-9. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno;
+10. **IA** — as nações controladas pela máquina jogam sozinhas a cada turno;
    só então uma cidade do jogador chega a ser atacada.
-10. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
+11. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
    destrava mover-se por território de outras facções e o combate entre
    esquadrões (hoje só se batalha contra territórios neutros).
