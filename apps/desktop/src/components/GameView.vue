@@ -158,6 +158,21 @@ import {
   type BattleReport,
   type BattleLog,
 } from "../game/battle";
+import {
+  LAW_CARDS,
+  LAW_QUALITIES,
+  LAW_QUALITY_LIST,
+  PACK_COST,
+  MAX_SLOT_TIER,
+  nextSlotExpansion,
+  loadFactionLaws,
+  openLawPack,
+  setActiveLaw,
+  expandLawSlots,
+  type LawId,
+  type LawQuality,
+  type FactionLaws,
+} from "../game/laws";
 import { loadSettings } from "../settings";
 
 const props = defineProps<{ saveId: number }>();
@@ -240,6 +255,25 @@ const showArmy = ref(false);
 const armyTab = ref<"squads" | "battles">("squads");
 /** Tropa selecionada para ser movida entre esquadrões. */
 const moveTroopId = ref<number | null>(null);
+
+// ===== Leis =====
+/** `true` enquanto o modal de leis está aberto. */
+const showLaws = ref(false);
+/** Aba ativa do modal de leis. */
+const lawsTab = ref<"active" | "inventory">("active");
+/** Estado de leis da facção do jogador (espaços, ativas, inventário). */
+const factionLaws = ref<FactionLaws | null>(null);
+/** `true` enquanto uma ação de lei (pacote, troca, expansão) está em curso. */
+const busyLaws = ref(false);
+/** Espaço de lei aguardando a escolha de uma carta do inventário. */
+const lawSwapTarget = ref<{ quality: LawQuality; slotIndex: number } | null>(
+  null,
+);
+/** Carta sorteada de um pacote — alimenta a animação de abertura. */
+const packReveal = ref<{ lawId: LawId; flipped: boolean } | null>(null);
+/** Cartas sorteadas ao abrir espaços novos (exibidas após a expansão). */
+const expansionReveal = ref<LawId[] | null>(null);
+let packFlipTimer: ReturnType<typeof setTimeout> | undefined;
 
 const mode = ref<"political" | "resource" | "climate">("political");
 const selected = ref<Province | null>(null);
@@ -1844,6 +1878,138 @@ function openArmy() {
   showArmy.value = true;
 }
 
+// ===== Leis =====
+
+/** Abre o modal de leis e carrega o estado de leis do jogador. */
+async function openLaws() {
+  if (!game.value?.playerCode) return;
+  lawsTab.value = "active";
+  lawSwapTarget.value = null;
+  packReveal.value = null;
+  expansionReveal.value = null;
+  showLaws.value = true;
+  try {
+    factionLaws.value = await loadFactionLaws(
+      props.saveId,
+      game.value.playerCode,
+    );
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Recarrega o estado de leis e as facções (a cultura muda com as ações). */
+async function reloadLaws() {
+  if (!game.value?.playerCode) return;
+  factionLaws.value = await loadFactionLaws(props.saveId, game.value.playerCode);
+  factions.value = await loadFactions(props.saveId);
+}
+
+/** Compra e abre um pacote de leis (custa cultura). */
+async function doBuyPack() {
+  if (!game.value?.playerCode || busyLaws.value) return;
+  busyLaws.value = true;
+  try {
+    const lawId = await openLawPack(props.saveId, game.value.playerCode);
+    await reloadLaws();
+    clearTimeout(packFlipTimer);
+    packReveal.value = { lawId, flipped: false };
+    // Vira a carta um instante após o pacote "rasgar".
+    packFlipTimer = setTimeout(() => {
+      if (packReveal.value) packReveal.value.flipped = true;
+    }, 900);
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  } finally {
+    busyLaws.value = false;
+  }
+}
+
+/** Fecha a animação de abertura de pacote. */
+function closePackReveal() {
+  clearTimeout(packFlipTimer);
+  packReveal.value = null;
+}
+
+/** Marca um espaço de lei para receber uma carta do inventário. */
+function startLawSwap(quality: LawQuality, slotIndex: number) {
+  lawSwapTarget.value = { quality, slotIndex };
+  lawsTab.value = "inventory";
+}
+
+/** Coloca a carta escolhida no espaço de lei marcado. */
+async function doSetActiveLaw(lawId: LawId) {
+  const target = lawSwapTarget.value;
+  if (!target || !game.value?.playerCode || busyLaws.value) return;
+  busyLaws.value = true;
+  try {
+    await setActiveLaw(
+      props.saveId,
+      game.value.playerCode,
+      target.quality,
+      target.slotIndex,
+      lawId,
+    );
+    await reloadLaws();
+    lawSwapTarget.value = null;
+    lawsTab.value = "active";
+    flashToast(`Lei ativada: ${LAW_CARDS[lawId].name}.`);
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  } finally {
+    busyLaws.value = false;
+  }
+}
+
+/** Abre o próximo nível de espaços de lei (custa cultura). */
+async function doExpandSlots() {
+  if (!game.value?.playerCode || busyLaws.value) return;
+  busyLaws.value = true;
+  try {
+    const res = await expandLawSlots(props.saveId, game.value.playerCode);
+    await reloadLaws();
+    expansionReveal.value = res.drawn;
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  } finally {
+    busyLaws.value = false;
+  }
+}
+
+/** Lei ativa num espaço (ou `null` enquanto o estado não carregou). */
+function activeLawAt(quality: LawQuality, slotIndex: number): LawId | null {
+  return (
+    factionLaws.value?.active.find(
+      (a) => a.quality === quality && a.slotIndex === slotIndex,
+    )?.lawId ?? null
+  );
+}
+
+/** Cultura acumulada da facção do jogador. */
+const playerCulture = computed(() => playerFaction.value?.culture ?? 0);
+
+/** Nível de espaços de lei do jogador (1 a 3). */
+const lawSlotTier = computed(() => factionLaws.value?.slotTier ?? 1);
+
+/** Próxima expansão de espaços de lei, ou `null` se já no máximo. */
+const lawExpansion = computed(() => nextSlotExpansion(lawSlotTier.value));
+
+/** Conjunto das leis ativas — usado para marcar as cartas do inventário. */
+const activeLawIdSet = computed(
+  () => new Set(factionLaws.value?.active.map((a) => a.lawId) ?? []),
+);
+
+/** Os espaços de lei agrupados por qualidade, prontos para a interface. */
+const lawGroups = computed(() =>
+  LAW_QUALITY_LIST.map((quality) => ({
+    quality,
+    slots: Array.from({ length: lawSlotTier.value }, (_, i) => ({
+      slotIndex: i,
+      lawId: activeLawAt(quality.id, i),
+    })),
+  })),
+);
+
 /** Esquadrão de origem da tropa que está sendo movida. */
 const moveTroopSource = computed<Squad | null>(() => {
   if (moveTroopId.value == null) return null;
@@ -2523,6 +2689,14 @@ function provinceFill(p: Province): string {
           @click="openArmy"
         >
           🪖
+        </button>
+        <button
+          class="side-btn"
+          :class="{ on: showLaws }"
+          title="Leis"
+          @click="openLaws"
+        >
+          📜
         </button>
         <div class="side-div"></div>
         <button
@@ -4364,6 +4538,374 @@ function provinceFill(p: Province): string {
         </div>
       </Transition>
 
+      <!-- Modal de leis: cards de leis ativas e inventário -->
+      <Transition name="fade">
+        <div
+          v-if="showLaws"
+          class="modal-scrim"
+          @click.self="showLaws = false"
+        >
+          <div class="modal laws-modal">
+            <div class="army-head">
+              <h3>📜 Leis</h3>
+              <span class="laws-culture">
+                🎭 {{ fmt(playerCulture) }} de cultura
+              </span>
+              <button class="x" @click="showLaws = false">✕</button>
+            </div>
+            <div class="army-tabs">
+              <button
+                :class="{ on: lawsTab === 'active' }"
+                @click="lawsTab = 'active'"
+              >
+                Leis ativas
+              </button>
+              <button
+                :class="{ on: lawsTab === 'inventory' }"
+                @click="lawsTab = 'inventory'"
+              >
+                Inventário ({{ factionLaws?.inventory.length ?? 0 }})
+              </button>
+            </div>
+
+            <div class="army-body laws-body">
+              <p v-if="!factionLaws" class="army-empty">Carregando leis…</p>
+
+              <!-- Aba: leis ativas -->
+              <template v-else-if="lawsTab === 'active'">
+                <p class="laws-intro">
+                  As leis preenchem espaços divididos igualmente entre boas,
+                  neutras e ruins. Cada espaço pode ser trocado por uma carta
+                  do seu inventário da mesma qualidade.
+                </p>
+                <div
+                  v-for="g in lawGroups"
+                  :key="g.quality.id"
+                  class="law-group"
+                >
+                  <div
+                    class="law-group-head"
+                    :style="{ '--lq': g.quality.color }"
+                  >
+                    <span class="lgh-title">
+                      {{ g.quality.icon }} Leis {{
+                        g.quality.label.toLowerCase()
+                      }}
+                    </span>
+                    <span class="lgh-desc">{{ g.quality.description }}</span>
+                  </div>
+                  <div class="law-slots">
+                    <div
+                      v-for="s in g.slots"
+                      :key="s.slotIndex"
+                      class="law-slot"
+                    >
+                      <div
+                        v-if="s.lawId"
+                        class="law-card"
+                        :class="'lq-' + LAW_CARDS[s.lawId].quality"
+                      >
+                        <div class="lc-top">
+                          <span class="lc-icon">{{
+                            LAW_CARDS[s.lawId].icon
+                          }}</span>
+                          <span class="lc-badge">{{
+                            LAW_QUALITIES[LAW_CARDS[s.lawId].quality].label
+                          }}</span>
+                        </div>
+                        <div class="lc-name">{{ LAW_CARDS[s.lawId].name }}</div>
+                        <div
+                          v-if="LAW_CARDS[s.lawId].quality !== 'NEUTRA'"
+                          class="lc-mag"
+                          :class="{
+                            high: LAW_CARDS[s.lawId].magnitude === 'ALTA',
+                          }"
+                        >
+                          {{
+                            LAW_CARDS[s.lawId].magnitude === "ALTA"
+                              ? "★ Efeito alto"
+                              : "Efeito normal"
+                          }}
+                        </div>
+                        <ul class="lc-effects">
+                          <li
+                            v-for="(ef, i) in LAW_CARDS[s.lawId].effects"
+                            :key="i"
+                            :class="ef.good ? 'up' : 'down'"
+                          >
+                            {{ ef.good ? "▲" : "▼" }} {{ ef.text }}
+                          </li>
+                        </ul>
+                        <p class="lc-flavor">{{ LAW_CARDS[s.lawId].flavor }}</p>
+                      </div>
+                      <div v-else class="law-card law-card-empty">Vazio</div>
+                      <button
+                        class="mini-btn law-swap-btn"
+                        :class="{
+                          on:
+                            lawSwapTarget?.quality === g.quality.id &&
+                            lawSwapTarget?.slotIndex === s.slotIndex,
+                        }"
+                        :disabled="busyLaws"
+                        @click="startLawSwap(g.quality.id, s.slotIndex)"
+                      >
+                        Trocar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="law-expand">
+                  <button
+                    v-if="lawExpansion"
+                    class="on"
+                    :disabled="busyLaws || playerCulture < lawExpansion.cost"
+                    @click="doExpandSlots"
+                  >
+                    Abrir espaços de lei — {{ fmt(lawExpansion.cost) }} 🎭
+                  </button>
+                  <p v-if="lawExpansion" class="laws-note">
+                    Abre +1 espaço de cada qualidade (nível
+                    {{ lawExpansion.tier }} de {{ MAX_SLOT_TIER }}). Cada espaço
+                    novo já vem com uma carta sorteada.
+                  </p>
+                  <p v-else class="laws-note">
+                    Você já abriu todos os {{ MAX_SLOT_TIER * 3 }} espaços de
+                    lei.
+                  </p>
+                </div>
+              </template>
+
+              <!-- Aba: inventário -->
+              <template v-else>
+                <div class="laws-shop">
+                  <button
+                    class="on"
+                    :disabled="busyLaws || playerCulture < PACK_COST"
+                    @click="doBuyPack"
+                  >
+                    🎴 Comprar pacote de leis — {{ PACK_COST }} 🎭
+                  </button>
+                  <p class="laws-note">
+                    O pacote sorteia uma carta — boa, neutra ou ruim — para o
+                    seu inventário. Cartas boas são as mais raras.
+                  </p>
+                </div>
+
+                <p v-if="lawSwapTarget" class="law-swap-banner">
+                  <span>
+                    Escolha uma lei
+                    <strong>{{
+                      LAW_QUALITIES[lawSwapTarget.quality].label.toLowerCase()
+                    }}</strong>
+                    do inventário para o espaço.
+                  </span>
+                  <button @click="lawSwapTarget = null">Cancelar</button>
+                </p>
+
+                <p
+                  v-if="factionLaws.inventory.length === 0"
+                  class="army-empty"
+                >
+                  Inventário vazio — compre um pacote de leis.
+                </p>
+                <div v-else class="law-inv-grid">
+                  <div
+                    v-for="entry in factionLaws.inventory"
+                    :key="entry.lawId"
+                    class="law-slot"
+                  >
+                    <div
+                      class="law-card"
+                      :class="'lq-' + LAW_CARDS[entry.lawId].quality"
+                    >
+                      <div class="lc-top">
+                        <span class="lc-icon">{{
+                          LAW_CARDS[entry.lawId].icon
+                        }}</span>
+                        <span class="lc-badge">{{
+                          LAW_QUALITIES[LAW_CARDS[entry.lawId].quality].label
+                        }}</span>
+                        <span v-if="entry.count > 1" class="lc-count"
+                          >×{{ entry.count }}</span
+                        >
+                      </div>
+                      <div class="lc-name">
+                        {{ LAW_CARDS[entry.lawId].name }}
+                      </div>
+                      <div
+                        v-if="LAW_CARDS[entry.lawId].quality !== 'NEUTRA'"
+                        class="lc-mag"
+                        :class="{
+                          high: LAW_CARDS[entry.lawId].magnitude === 'ALTA',
+                        }"
+                      >
+                        {{
+                          LAW_CARDS[entry.lawId].magnitude === "ALTA"
+                            ? "★ Efeito alto"
+                            : "Efeito normal"
+                        }}
+                      </div>
+                      <ul class="lc-effects">
+                        <li
+                          v-for="(ef, i) in LAW_CARDS[entry.lawId].effects"
+                          :key="i"
+                          :class="ef.good ? 'up' : 'down'"
+                        >
+                          {{ ef.good ? "▲" : "▼" }} {{ ef.text }}
+                        </li>
+                      </ul>
+                      <p class="lc-flavor">
+                        {{ LAW_CARDS[entry.lawId].flavor }}
+                      </p>
+                    </div>
+                    <button
+                      v-if="
+                        lawSwapTarget &&
+                        LAW_CARDS[entry.lawId].quality === lawSwapTarget.quality
+                      "
+                      class="mini-btn"
+                      :disabled="busyLaws"
+                      @click="doSetActiveLaw(entry.lawId)"
+                    >
+                      Colocar no espaço
+                    </button>
+                    <span
+                      v-else-if="activeLawIdSet.has(entry.lawId)"
+                      class="law-active-tag"
+                    >
+                      ✓ Ativa
+                    </span>
+                    <span v-else class="law-active-tag dim">No inventário</span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Animação: abertura de um pacote de leis -->
+      <Transition name="fade">
+        <div
+          v-if="packReveal"
+          class="pack-overlay"
+          @click.self="closePackReveal"
+        >
+          <div class="pack-scene">
+            <div class="pack-glow"></div>
+            <div
+              class="pack-card-3d"
+              :class="{ flipped: packReveal.flipped }"
+            >
+              <div class="pack-card-inner">
+                <div class="pcc-face pcc-back">
+                  <span class="pcc-back-mark">📜</span>
+                  <span class="pcc-back-label">LEI</span>
+                </div>
+                <div
+                  class="pcc-face pcc-front law-card"
+                  :class="'lq-' + LAW_CARDS[packReveal.lawId].quality"
+                >
+                  <div class="lc-top">
+                    <span class="lc-icon">{{
+                      LAW_CARDS[packReveal.lawId].icon
+                    }}</span>
+                    <span class="lc-badge">{{
+                      LAW_QUALITIES[LAW_CARDS[packReveal.lawId].quality].label
+                    }}</span>
+                  </div>
+                  <div class="lc-name">
+                    {{ LAW_CARDS[packReveal.lawId].name }}
+                  </div>
+                  <div
+                    v-if="LAW_CARDS[packReveal.lawId].quality !== 'NEUTRA'"
+                    class="lc-mag"
+                    :class="{
+                      high: LAW_CARDS[packReveal.lawId].magnitude === 'ALTA',
+                    }"
+                  >
+                    {{
+                      LAW_CARDS[packReveal.lawId].magnitude === "ALTA"
+                        ? "★ Efeito alto"
+                        : "Efeito normal"
+                    }}
+                  </div>
+                  <ul class="lc-effects">
+                    <li
+                      v-for="(ef, i) in LAW_CARDS[packReveal.lawId].effects"
+                      :key="i"
+                      :class="ef.good ? 'up' : 'down'"
+                    >
+                      {{ ef.good ? "▲" : "▼" }} {{ ef.text }}
+                    </li>
+                  </ul>
+                  <p class="lc-flavor">
+                    {{ LAW_CARDS[packReveal.lawId].flavor }}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <p v-if="!packReveal.flipped" class="pack-hint">
+              Abrindo o pacote…
+            </p>
+            <button
+              v-else
+              class="on pack-continue"
+              @click="closePackReveal"
+            >
+              Continuar
+            </button>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Cartas sorteadas ao abrir espaços de lei -->
+      <Transition name="fade">
+        <div
+          v-if="expansionReveal"
+          class="modal-scrim"
+          @click.self="expansionReveal = null"
+        >
+          <div class="modal laws-expand-modal">
+            <h3>Espaços de lei abertos!</h3>
+            <p class="modal-text">
+              Cada espaço novo recebeu uma carta sorteada:
+            </p>
+            <div class="law-expand-cards">
+              <div
+                v-for="(id, i) in expansionReveal"
+                :key="i"
+                class="law-card"
+                :class="'lq-' + LAW_CARDS[id].quality"
+              >
+                <div class="lc-top">
+                  <span class="lc-icon">{{ LAW_CARDS[id].icon }}</span>
+                  <span class="lc-badge">{{
+                    LAW_QUALITIES[LAW_CARDS[id].quality].label
+                  }}</span>
+                </div>
+                <div class="lc-name">{{ LAW_CARDS[id].name }}</div>
+                <ul class="lc-effects">
+                  <li
+                    v-for="(ef, j) in LAW_CARDS[id].effects"
+                    :key="j"
+                    :class="ef.good ? 'up' : 'down'"
+                  >
+                    {{ ef.good ? "▲" : "▼" }} {{ ef.text }}
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button class="on" @click="expansionReveal = null">
+                Continuar
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
       <!-- Diálogo: escolher o esquadrão que recebe as tropas do inventário -->
       <Transition name="fade">
         <div
@@ -5941,6 +6483,334 @@ tr.me {
   padding: 8px 14px;
   border-radius: 8px;
   margin: 0;
+}
+
+/* ===== Modal de leis ===== */
+.laws-modal {
+  width: 700px;
+  max-width: 95vw;
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+  padding: 0;
+}
+.laws-culture {
+  margin-left: auto;
+  margin-right: 12px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #b884d0;
+}
+.laws-body {
+  gap: 14px;
+}
+.laws-intro,
+.laws-note {
+  font-size: 0.76rem;
+  color: #9aa0ac;
+  margin: 0;
+  line-height: 1.45;
+}
+
+.law-group {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 10px 12px;
+}
+.law-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-left: 3px solid var(--lq);
+  padding-left: 8px;
+  margin-bottom: 9px;
+}
+.lgh-title {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.86rem;
+}
+.lgh-desc {
+  font-size: 0.72rem;
+  color: #8b93a1;
+}
+.law-slots,
+.law-inv-grid,
+.law-expand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.law-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 152px;
+}
+
+.law-card {
+  width: 152px;
+  min-height: 172px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: linear-gradient(160deg, #1a212e, #131820);
+  box-sizing: border-box;
+}
+.law-card.lq-BOA {
+  border-color: #3f7d3f;
+  background: linear-gradient(160deg, #16241a, #111a14);
+}
+.law-card.lq-NEUTRA {
+  border-color: #8a6f2c;
+  background: linear-gradient(160deg, #241f12, #1a160d);
+}
+.law-card.lq-RUIM {
+  border-color: #8a3f33;
+  background: linear-gradient(160deg, #261614, #1a0f0d);
+}
+.law-card-empty {
+  align-items: center;
+  justify-content: center;
+  color: #5f6776;
+  font-style: italic;
+  border-style: dashed;
+}
+.lc-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lc-icon {
+  font-size: 1.5rem;
+}
+.lc-badge {
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #cdd2da;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 2px 5px;
+}
+.lc-count {
+  margin-left: auto;
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: var(--gold);
+}
+.lc-name {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.82rem;
+  line-height: 1.2;
+}
+.lc-mag {
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: #9aa0ac;
+}
+.lc-mag.high {
+  color: var(--gold);
+}
+.lc-effects {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.lc-effects li {
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+.lc-effects li.up {
+  color: #8ed08a;
+}
+.lc-effects li.down {
+  color: #e0917f;
+}
+.lc-flavor {
+  margin: auto 0 0;
+  padding-top: 5px;
+  font-size: 0.67rem;
+  font-style: italic;
+  color: #7d8694;
+  line-height: 1.35;
+}
+.law-swap-btn.on {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+.law-active-tag {
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #8ed08a;
+  padding: 4px 0;
+}
+.law-active-tag.dim {
+  color: #7d8694;
+  font-weight: 600;
+}
+
+.law-expand {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.law-expand button,
+.laws-shop button {
+  align-self: flex-start;
+}
+.laws-shop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.law-swap-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(232, 184, 74, 0.12);
+  border: 1px solid rgba(232, 184, 74, 0.4);
+  border-radius: 7px;
+  padding: 8px 11px;
+  font-size: 0.78rem;
+  color: #e8dcc0;
+  margin: 0;
+}
+.law-swap-banner strong {
+  color: #fff;
+}
+.law-swap-banner button {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+}
+
+/* ===== Animação do pacote de leis ===== */
+.pack-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  background: rgba(6, 9, 14, 0.86);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pack-scene {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  position: relative;
+}
+.pack-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 340px;
+  height: 340px;
+  transform: translate(-50%, -62%);
+  background: radial-gradient(
+    circle,
+    rgba(184, 132, 208, 0.36),
+    transparent 65%
+  );
+  animation: pack-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes pack-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.pack-card-3d {
+  width: 210px;
+  height: 290px;
+  perspective: 1100px;
+  animation: card-emerge 0.7s cubic-bezier(0.2, 0.85, 0.3, 1.2) both;
+}
+@keyframes card-emerge {
+  0% {
+    transform: translateY(130px) scale(0.45);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+.pack-card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transform: rotateY(180deg);
+  transition: transform 0.75s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.pack-card-3d.flipped .pack-card-inner {
+  transform: rotateY(0deg);
+}
+.pcc-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  border-radius: 12px;
+  box-sizing: border-box;
+}
+.pcc-back {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: linear-gradient(150deg, #3a2b50, #211633);
+  border: 2px solid #6b4f8f;
+  transform: rotateY(180deg);
+}
+.pcc-back-mark {
+  font-size: 4.2rem;
+}
+.pcc-back-label {
+  font-weight: 900;
+  letter-spacing: 0.32em;
+  font-size: 0.9rem;
+  color: #b884d0;
+}
+.pcc-front {
+  width: 210px;
+  height: 290px;
+  gap: 7px;
+}
+.pack-hint {
+  font-size: 0.85rem;
+  color: #b884d0;
+  font-weight: 700;
+  margin: 0;
+}
+.pack-continue {
+  min-width: 150px;
+}
+.laws-expand-modal {
+  width: auto;
+}
+.law-expand-cards {
+  justify-content: center;
+  margin: 4px 0 2px;
 }
 
 /* ===== Aviso flutuante (toast) ===== */

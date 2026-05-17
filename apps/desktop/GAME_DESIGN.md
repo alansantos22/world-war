@@ -311,6 +311,8 @@ personalizada).
 | `research_points` | INTEGER | Pontos de pesquisa.                    |
 | `culture`         | INTEGER | Cultura.                               |
 | `tax_level`       | TEXT    | Nível de imposto cobrado (seção 13).   |
+| `prosperity`      | REAL    | Prosperidade da facção (seção 13).     |
+| `law_slot_tier`   | INTEGER | Nível de espaços de lei: 1, 2 ou 3 (seção 15). |
 
 ### Tabela `squads`
 
@@ -483,6 +485,31 @@ Uma linha por **estrada/ferrovia na fila** de uma cidade (ver seção 14).
 | `prod_cost`  | INTEGER | Produção total necessária.                      |
 | `prod_done`  | INTEGER | Produção já investida.                          |
 | `money_cost` | INTEGER | Dinheiro cobrado ao enfileirar (devolvido se cancelar). |
+
+### Tabela `law_inventory`
+
+Uma linha por **carta de lei** que uma facção possui (ver seção 15).
+
+| Coluna       | Tipo    | Descrição                                       |
+|--------------|---------|-------------------------------------------------|
+| `id`         | INTEGER | Chave primária.                                 |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
+| `owner_code` | TEXT    | Código da facção dona.                          |
+| `law_id`     | TEXT    | Identificador da lei no catálogo (`LAW_CARDS`). |
+| `count`      | INTEGER | Quantas cópias dessa carta a facção tem.        |
+
+### Tabela `active_laws`
+
+Uma linha por **espaço de lei ocupado** de uma facção (ver seção 15).
+
+| Coluna       | Tipo    | Descrição                                       |
+|--------------|---------|-------------------------------------------------|
+| `id`         | INTEGER | Chave primária.                                 |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
+| `owner_code` | TEXT    | Código da facção dona.                          |
+| `quality`    | TEXT    | Qualidade do espaço: `BOA`, `NEUTRA` ou `RUIM`. |
+| `slot_index` | INTEGER | Índice do espaço dentro da qualidade (0-based).  |
+| `law_id`     | TEXT    | Lei colocada no espaço.                         |
 
 Criar um novo jogo gera o mapa, grava as províncias, cria as facções e semeia
 uma **cidade em cada capital**; carregar uma partida lê tudo do seu `save_id`.
@@ -1335,7 +1362,87 @@ para estrada, cinza-aço para ferrovia.
 
 ---
 
-## 15. Estrutura do código
+## 15. Leis
+
+A facção governa por **cards de leis**. O sistema vive em
+[`src/game/laws.ts`](src/game/laws.ts) e abre pelo botão **📜 Leis** da barra
+lateral, num modal próprio.
+
+### Qualidade das leis
+
+Toda lei é um card com uma de três qualidades:
+
+- **Boa** — só traz **buffs** (normais ou altos);
+- **Neutra** — traz um **buff** em troca de um **debuff** (ex.: "Nação
+  Pacifista" — tropas custam menos manutenção, mas não dá para recrutar
+  esquadrões ofensivos);
+- **Ruim** — só traz **debuffs** (normais ou altos).
+
+### Espaços de lei
+
+Os espaços são divididos **igualmente** entre as três qualidades — nunca dá
+para ter mais leis boas do que neutras ou ruins. O nível de espaços
+(`factions.law_slot_tier`) começa em **1** (3 leis ativas: 1 boa, 1 neutra, 1
+ruim) e pode crescer:
+
+| Nível | Espaços por qualidade | Leis ativas | Custo para abrir |
+|-------|-----------------------|-------------|------------------|
+| 1     | 1                     | 3           | inicial          |
+| 2     | 2                     | 6           | 1.000 de cultura |
+| 3     | 3                     | 9           | 5.000 de cultura |
+
+Os espaços estão **sempre preenchidos**. Toda facção começa com 1 carta
+sorteada de cada qualidade, já colocada no seu espaço. Ao abrir um nível novo,
+cada espaço novo (1 de cada qualidade) já nasce com uma carta sorteada.
+
+### Pacotes de leis
+
+Leis novas saem de **pacotes** comprados com **cultura**, estilo figurinha de
+banca. Cada pacote custa **100 de cultura** e sorteia **uma** carta para o
+**inventário** — pode sair carta repetida. As chances do sorteio favorecem as
+cartas piores (cartas boas são as mais raras):
+
+| Qualidade | Chance |
+|-----------|--------|
+| Boa       | 25%    |
+| Neutra    | 35%    |
+| Ruim      | 40%    |
+
+A abertura do pacote tem uma animação: a carta sai virada de costas e gira
+para revelar a lei. Depois, o jogador pode **trocar** uma lei ativa por outra
+do inventário — desde que a qualidade do espaço seja respeitada (uma carta boa
+só entra num espaço de lei boa, etc.).
+
+### Interface
+
+O modal de leis tem duas abas:
+
+- **Leis ativas** — os espaços agrupados por qualidade; cada espaço tem um
+  botão **Trocar**. Abaixo, o botão de **abrir espaços de lei**.
+- **Inventário** — a coleção de cartas (com a quantidade de cópias) e o botão
+  de **comprar pacote**.
+
+### Anti-trapaça
+
+As funções de `laws.ts` recarregam o estado do banco e **recalculam** custo,
+sorteio e validações. A UI nunca envia custo, carta sorteada nem resultado —
+só dispara a ação. O sorteio (`Math.random`) acontece sempre na lógica de
+jogo.
+
+### Planejado
+
+- O **catálogo de leis** atual é um conjunto-semente de exemplo (12 cartas) e
+  os efeitos são, por enquanto, apenas **descritivos** — o sistema numérico
+  que aplica os modificadores na economia/combate ainda será desenhado, junto
+  da lista definitiva de leis.
+- **Leis-padrão da ideologia** — leis inerentes ao direcionamento político da
+  facção, que certos cards poderiam **amenizar** (ex.: uma nação comunista com
+  um card de "zona de livre comércio").
+- As **facções da IA** usando leis.
+
+---
+
+## 16. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -1360,6 +1467,7 @@ apps/desktop/src/
     ├── cities.ts         cidades, colonos e fundação de cidades
     ├── constructions.ts  setores, construções e fila de construção
     ├── roads.ts          estradas/ferrovias: A\*, custos e fila de estradas
+    ├── laws.ts           sistema de leis: cards, pacotes, espaços e inventário
     ├── battle.ts         resolução de combate (dano, debuffs de ambiente)
     ├── map-generator.ts  geração procedural do mapa
     ├── world.ts          esquema SQLite, persistência e avanço de turno
@@ -1368,7 +1476,7 @@ apps/desktop/src/
 
 ---
 
-## 16. Roteiro (próximos passos)
+## 17. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.
@@ -1400,3 +1508,7 @@ apps/desktop/src/
 11. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
    destrava mover-se por território de outras facções e o combate entre
    esquadrões (hoje só se batalha contra territórios neutros).
+12. **Leis** — *parcial*: a **estrutura** do sistema de cards de leis está
+   pronta (seção 15) — espaços, pacotes, inventário e troca de leis. Falta a
+   **lista definitiva de leis** e o **sistema numérico** que aplica os efeitos
+   na economia/combate, além das **leis-padrão da ideologia**.

@@ -249,7 +249,8 @@ export async function ensureSchema(): Promise<void> {
       research_points INTEGER NOT NULL,
       culture         INTEGER NOT NULL DEFAULT 0,
       tax_level       TEXT    NOT NULL DEFAULT 'MEDIO',
-      prosperity      REAL    NOT NULL DEFAULT 40
+      prosperity      REAL    NOT NULL DEFAULT 40,
+      law_slot_tier   INTEGER NOT NULL DEFAULT 1
     )
   `);
   // Migração: a coluna de cultura (facções anteriores a esse valor).
@@ -271,6 +272,12 @@ export async function ensureSchema(): Promise<void> {
   if (!factionCols.some((c) => c.name === 'prosperity')) {
     await db.execute(
       'ALTER TABLE factions ADD COLUMN prosperity REAL NOT NULL DEFAULT 40',
+    );
+  }
+  // Migração: o nível de espaços de lei (facções anteriores ao sistema de leis).
+  if (!factionCols.some((c) => c.name === 'law_slot_tier')) {
+    await db.execute(
+      'ALTER TABLE factions ADD COLUMN law_slot_tier INTEGER NOT NULL DEFAULT 1',
     );
   }
 
@@ -502,6 +509,29 @@ export async function ensureSchema(): Promise<void> {
       prod_cost  INTEGER NOT NULL,
       prod_done  INTEGER NOT NULL DEFAULT 0,
       money_cost INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  // Inventário de leis — todas as cartas de lei que uma facção possui.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS law_inventory (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      law_id     TEXT    NOT NULL,
+      count      INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+
+  // Leis ativas — uma linha por espaço de lei ocupado de cada facção.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS active_laws (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      quality    TEXT    NOT NULL,
+      slot_index INTEGER NOT NULL,
+      law_id     TEXT    NOT NULL
     )
   `);
 
