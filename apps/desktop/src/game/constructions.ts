@@ -163,6 +163,12 @@ export interface ConstructionType {
   collects?: { resource: ResourceType; amount: number };
   /** Combustível consumido por turno (usinas). */
   fuel?: { resource: ResourceType; amount: number };
+  /**
+   * Recursos do **estoque da cidade** consumidos ao enfileirar a construção
+   * (além do dinheiro). A cidade precisa ter o estoque na hora; é devolvido se
+   * a ordem for cancelada. Ferro e madeira são os mais usados.
+   */
+  resourceCost?: Partial<Record<ResourceType, number>>;
 }
 
 /** Catálogo das construções. */
@@ -189,6 +195,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 350,
     moneyCost: 1000,
     upkeep: 20,
+    resourceCost: { [ResourceType.MADEIRA]: 16 },
     maxPerTile: 2,
     description: '+20% na capacidade de estoque de comida da cidade.',
     requiresResearch: null,
@@ -215,6 +222,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 600,
     moneyCost: 6500,
     upkeep: 80,
+    resourceCost: { [ResourceType.MADEIRA]: 8 },
     maxPerTile: 1,
     description:
       'Extrai o recurso mineral do tile (3/turno; recursos raros 1/turno).',
@@ -228,6 +236,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 700,
     moneyCost: 5000,
     upkeep: 120,
+    resourceCost: { [ResourceType.FERRO]: 16, [ResourceType.MADEIRA]: 8 },
     maxPerTile: 1,
     description:
       'Aumenta a produtividade da cidade (e o dinheiro, conforme o direcionamento).',
@@ -241,6 +250,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 500,
     moneyCost: 3500,
     upkeep: 40,
+    resourceCost: { [ResourceType.MADEIRA]: 20 },
     maxPerTile: 2,
     description:
       '+50% na capacidade de minérios, madeira e petróleo da cidade.',
@@ -254,6 +264,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 600,
     moneyCost: 4000,
     upkeep: 50,
+    resourceCost: { [ResourceType.FERRO]: 6 },
     maxPerTile: 1,
     description: 'Coleta 2 de madeira por turno (tile de Madeira).',
     requiresResearch: null,
@@ -267,6 +278,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1200,
     moneyCost: 15000,
     upkeep: 130,
+    resourceCost: { [ResourceType.FERRO]: 22 },
     maxPerTile: 1,
     description: 'Coleta 2 de petróleo por turno (tile de Petróleo).',
     requiresResearch: null,
@@ -280,6 +292,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1000,
     moneyCost: 11000,
     upkeep: 150,
+    resourceCost: { [ResourceType.FERRO]: 14, [ResourceType.MADEIRA]: 6 },
     maxPerTile: 1,
     description: 'Consome 2 de carvão por turno e gera 10 de energia.',
     requiresResearch: null,
@@ -294,6 +307,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 4000,
     moneyCost: 45000,
     upkeep: 500,
+    resourceCost: { [ResourceType.FERRO]: 24, [ResourceType.URANIO]: 5 },
     maxPerTile: 1,
     description: 'Consome 1 de urânio por turno e gera 45 de energia.',
     requiresResearch: null,
@@ -308,6 +322,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1500,
     moneyCost: 24000,
     upkeep: 260,
+    resourceCost: { [ResourceType.FERRO]: 18 },
     maxPerTile: 1,
     description: 'Consome 1 de petróleo por turno e gera 20 de energia.',
     requiresResearch: null,
@@ -323,6 +338,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 900,
     moneyCost: 12000,
     upkeep: 100,
+    resourceCost: { [ResourceType.MADEIRA]: 22, [ResourceType.FERRO]: 10 },
     maxPerTile: 2,
     description:
       '+500 mil no teto de população (+750 mil no comunismo).',
@@ -338,6 +354,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1200,
     moneyCost: 8000,
     upkeep: 80,
+    resourceCost: { [ResourceType.MADEIRA]: 16, [ResourceType.FERRO]: 14 },
     maxPerTile: 1,
     forbidden: ['COMUNISTA'],
     description:
@@ -454,6 +471,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 600,
     moneyCost: 9500,
     upkeep: 130,
+    resourceCost: { [ResourceType.MADEIRA]: 14, [ResourceType.FERRO]: 8 },
     maxPerTile: 1,
     forbidden: ['COMUNISTA'],
     description: 'Gera 900 de dinheiro por turno.',
@@ -469,6 +487,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 600,
     moneyCost: 16000,
     upkeep: 190,
+    resourceCost: { [ResourceType.FERRO]: 14, [ResourceType.MADEIRA]: 12 },
     maxPerTile: 1,
     forbidden: ['COMUNISTA'],
     description:
@@ -485,6 +504,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 650,
     moneyCost: 30000,
     upkeep: 300,
+    resourceCost: { [ResourceType.FERRO]: 14, [ResourceType.MADEIRA]: 8 },
     maxPerTile: 1,
     maxPerFaction: 1,
     forbidden: ['INDEPENDENTE'],
@@ -501,6 +521,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 500,
     moneyCost: 50000,
     upkeep: 420,
+    resourceCost: { [ResourceType.FERRO]: 12 },
     maxPerTile: 1,
     maxPerFaction: 1,
     forbidden: ['COMUNISTA'],
@@ -570,6 +591,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 600,
     moneyCost: 12000,
     upkeep: 120,
+    resourceCost: { [ResourceType.FERRO]: 14, [ResourceType.MADEIRA]: 16 },
     maxPerTile: 1,
     description: 'Aumenta a ordem e muito a influência religiosa (em breve).',
     requiresResearch: null,
@@ -595,6 +617,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 550,
     moneyCost: 6500,
     upkeep: 80,
+    resourceCost: { [ResourceType.MADEIRA]: 12, [ResourceType.FERRO]: 8 },
     maxPerTile: 1,
     description:
       'As tropas da cidade custam +10% de produção, mas nascem com 5 de experiência.',
@@ -608,6 +631,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 500,
     moneyCost: 10000,
     upkeep: 110,
+    resourceCost: { [ResourceType.MADEIRA]: 14, [ResourceType.FERRO]: 8 },
     maxPerTile: 1,
     description:
       'Comandantes montados na cidade nascem com 2★ (chance de 3★/4★) e 15 de experiência.',
@@ -621,6 +645,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1100,
     moneyCost: 15000,
     upkeep: 160,
+    resourceCost: { [ResourceType.FERRO]: 20 },
     maxPerTile: 1,
     description: 'Libera a produção de armas (em breve). Consome 2 de energia.',
     requiresResearch: null,
@@ -634,6 +659,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1200,
     moneyCost: 19000,
     upkeep: 190,
+    resourceCost: { [ResourceType.FERRO]: 24 },
     maxPerTile: 1,
     description:
       'Libera a produção de armaduras (em breve). Consome 2 de energia.',
@@ -648,6 +674,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 2500,
     moneyCost: 28000,
     upkeep: 260,
+    resourceCost: { [ResourceType.FERRO]: 22, [ResourceType.MADEIRA]: 10 },
     maxPerTile: 1,
     description: 'Reforça a defesa da cidade no cerco (em breve).',
     requiresResearch: null,
@@ -660,6 +687,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 4000,
     moneyCost: 40000,
     upkeep: 360,
+    resourceCost: { [ResourceType.FERRO]: 28 },
     maxPerTile: 1,
     description: 'Reforça muito a defesa da cidade no cerco (em breve).',
     requiresResearch: null,
@@ -672,6 +700,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 2500,
     moneyCost: 26000,
     upkeep: 250,
+    resourceCost: { [ResourceType.FERRO]: 24, [ResourceType.COBRE]: 8 },
     maxPerTile: 1,
     description: 'Armazena e lança mísseis contra inimigos (em breve).',
     requiresResearch: null,
@@ -726,6 +755,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 650,
     moneyCost: 9500,
     upkeep: 100,
+    resourceCost: { [ResourceType.MADEIRA]: 16, [ResourceType.FERRO]: 8 },
     maxPerTile: 1,
     description: 'Gera 8 de pesquisa por turno.',
     requiresResearch: null,
@@ -740,6 +770,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 950,
     moneyCost: 14000,
     upkeep: 150,
+    resourceCost: { [ResourceType.FERRO]: 12, [ResourceType.COBRE]: 8 },
     maxPerTile: 1,
     description: 'Gera 12 de pesquisa por turno.',
     requiresResearch: null,
@@ -753,6 +784,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     prodCost: 1150,
     moneyCost: 18000,
     upkeep: 180,
+    resourceCost: { [ResourceType.FERRO]: 16, [ResourceType.COBRE]: 10 },
     maxPerTile: 1,
     description: 'Gera 15 de pesquisa por turno.',
     requiresResearch: null,
@@ -1233,6 +1265,25 @@ export async function queueConstruction(
     throw new Error(`Dinheiro insuficiente (${cost.moneyCost}).`);
   }
 
+  // Recursos do estoque da cidade consumidos ao enfileirar.
+  const resCost = def.resourceCost;
+  if (resCost) {
+    const resRows = await db.select<{ resource: string; amount: number }[]>(
+      'SELECT resource, amount FROM city_resources WHERE save_id = ? AND x = ? AND y = ?',
+      [saveId, cityX, cityY],
+    );
+    const stock = new Map(resRows.map((r) => [r.resource, r.amount]));
+    for (const [res, need] of Object.entries(resCost)) {
+      const have = stock.get(res) ?? 0;
+      if (have < (need as number)) {
+        const info = resourceLabel(res);
+        throw new Error(
+          `${def.label} exige ${need} de ${info.label} no estoque da cidade (tem ${have}).`,
+        );
+      }
+    }
+  }
+
   await db.execute('BEGIN');
   try {
     if (cost.moneyCost > 0) {
@@ -1240,6 +1291,15 @@ export async function queueConstruction(
         'UPDATE factions SET money = money - ? WHERE save_id = ? AND code = ?',
         [cost.moneyCost, saveId, ownerCode],
       );
+    }
+    if (resCost) {
+      for (const [res, need] of Object.entries(resCost)) {
+        await db.execute(
+          `UPDATE city_resources SET amount = amount - ?
+            WHERE save_id = ? AND x = ? AND y = ? AND resource = ?`,
+          [need, saveId, cityX, cityY, res],
+        );
+      }
     }
     await db.execute(
       `INSERT INTO construction_orders
@@ -1266,7 +1326,11 @@ export async function queueConstruction(
   }
 }
 
-/** Cancela uma ordem de construção e devolve o dinheiro pago. */
+/**
+ * Cancela uma ordem de construção e devolve o dinheiro pago e os recursos
+ * consumidos ao enfileirar (a devolução respeita a capacidade de estoque da
+ * cidade — o excedente é perdido).
+ */
 export async function cancelConstruction(orderId: number): Promise<void> {
   const db = await getDb();
   const rows = await db.select<ConstructionOrderRow[]>(
@@ -1282,6 +1346,37 @@ export async function cancelConstruction(orderId: number): Promise<void> {
         'UPDATE factions SET money = money + ? WHERE save_id = ? AND code = ?',
         [o.money_cost, o.save_id, o.owner_code],
       );
+    }
+    const resCost = CONSTRUCTIONS[o.kind as ConstructionKind].resourceCost;
+    if (resCost) {
+      const arm = await db.select<{ n: number }[]>(
+        `SELECT COUNT(*) AS n FROM constructions
+          WHERE save_id = ? AND city_x = ? AND city_y = ? AND kind = 'ARMAZEM'`,
+        [o.save_id, o.city_x, o.city_y],
+      );
+      const armazens = arm[0]?.n ?? 0;
+      for (const [res, amt] of Object.entries(resCost)) {
+        const cap = resourceCapacity(res, armazens);
+        const cur = await db.select<{ amount: number }[]>(
+          `SELECT amount FROM city_resources
+            WHERE save_id = ? AND x = ? AND y = ? AND resource = ?`,
+          [o.save_id, o.city_x, o.city_y, res],
+        );
+        if (cur[0]) {
+          const next = Math.min(cap, cur[0].amount + (amt as number));
+          await db.execute(
+            `UPDATE city_resources SET amount = ?
+              WHERE save_id = ? AND x = ? AND y = ? AND resource = ?`,
+            [next, o.save_id, o.city_x, o.city_y, res],
+          );
+        } else {
+          await db.execute(
+            `INSERT INTO city_resources (save_id, x, y, resource, amount)
+             VALUES (?, ?, ?, ?, ?)`,
+            [o.save_id, o.city_x, o.city_y, res, Math.min(cap, amt as number)],
+          );
+        }
+      }
     }
     await db.execute('DELETE FROM construction_orders WHERE id = ?', [orderId]);
     await db.execute('COMMIT');

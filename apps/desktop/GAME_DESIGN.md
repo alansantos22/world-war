@@ -1083,6 +1083,23 @@ construção está nesta tabela:
 | Militar    | Quartel 80 · Academia 110 · Fábrica de armamento 160 · Fábrica de armaduras 190 · Fortificação 260 · Muralhas 360 · Silo de mísseis 250 |
 | Pesquisa   | Escola 25 · Biblioteca 35 · Observatório 55 · Universidade 100 · Laboratório militar 150 · Centro de pesquisas 180 |
 
+Algumas construções, além do dinheiro e da produção, **consomem recursos do
+estoque (Armazém) da cidade** ao serem enfileiradas — a cidade precisa ter o
+estoque na hora. Os recursos voltam (respeitando a capacidade de estoque) se a
+ordem for cancelada. **Ferro** e **madeira** são os mais usados; a usina
+nuclear ainda exige **reserva de urânio**. As demais construções não custam
+recursos.
+
+| Setor | Construção · recursos consumidos ao construir |
+|-------|-----------------------------------------------|
+| Agrícola   | Celeiro: 16 madeira |
+| Industrial | Mina: 8 madeira · Zona de fábricas: 16 ferro + 8 madeira · Armazém: 20 madeira · Madeireira: 6 ferro · Oleoduto: 22 ferro · Usina a carvão: 14 ferro + 6 madeira · Usina nuclear: 24 ferro + 5 urânio · Usina de petróleo: 18 ferro |
+| Urbano     | Conjunto habitacional: 22 madeira + 10 ferro · Área urbana: 16 madeira + 14 ferro |
+| Comercial  | Shopping: 14 madeira + 8 ferro · Zona comercial: 14 ferro + 12 madeira · Banco Nacional: 14 ferro + 8 madeira · Bolsa de valores: 12 ferro |
+| Religioso  | Catedral: 14 ferro + 16 madeira |
+| Militar    | Quartel: 12 madeira + 8 ferro · Academia: 14 madeira + 8 ferro · Fábrica de armamento: 20 ferro · Fábrica de armaduras: 24 ferro · Fortificação: 22 ferro + 10 madeira · Muralhas: 28 ferro · Silo de mísseis: 24 ferro + 8 cobre |
+| Pesquisa   | Universidade: 16 madeira + 8 ferro · Laboratório militar: 12 ferro + 8 cobre · Centro de pesquisas: 16 ferro + 10 cobre |
+
 **Agrícola** — Fazenda (450/2.500, 1/tile, +5 de comida; ×3 e bônus de clima
 em Terras Agrícolas); Celeiro (350/1.000, 2/tile, +20% na capacidade de
 comida); Pasto (600/4.000, 1/tile, +5 de comida; gado→couro, ovelha→lã,
@@ -1168,11 +1185,19 @@ habitantes (100 mil ⇒ 400). O **nível de imposto** é definido no painel
 Modificadores de economia por **direcionamento**:
 
 - **Estados independentes** — +20% em zonas comerciais, +10% em industriais e
-  +10% em agrícolas.
+  +10% em agrícolas; buff **Abertura de concorrência**: −15% na manutenção das
+  construções.
 - **Comunistas** — empobrecimento: −60% nos impostos, −60% em zonas comerciais
-  e −50% em zonas industriais.
+  e −50% em zonas industriais; buff **Materiais mais baratos**: −20% na
+  manutenção das construções.
 - **Repúblicas** e **império** — sem buff/debuff (gap: **políticas e leis**
   exclusivas).
+
+> **Regra de design dos direcionamentos:** um **buff/debuff** é um efeito
+> **nomeado** (ex.: *Materiais mais baratos*, *Abertura de concorrência*). Cada
+> direcionamento pode ter no máximo **3 buffs** e **2 debuffs**. As demais
+> diferenças entre direcionamentos (multiplicadores de economia, moradia,
+> proibições) **não contam** — são **leis** da ideologia (feature futura).
 
 A **zona de fábricas** rende produtividade e dinheiro conforme o
 direcionamento: comunistas +15 / 0 $, império +12 / 0 $, repúblicas +8 /

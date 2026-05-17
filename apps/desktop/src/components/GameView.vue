@@ -1199,6 +1199,14 @@ function buildBlockReason(c: ConstructionType): string {
   if ((playerFaction.value?.money ?? 0) < costOf(c.kind).moneyCost) {
     return "Dinheiro insuficiente.";
   }
+  if (c.resourceCost) {
+    const stock = influencingCityStock.value;
+    for (const [res, need] of Object.entries(c.resourceCost)) {
+      if ((stock.get(res) ?? 0) < (need as number)) {
+        return `Faltam ${need} de ${resourceLabel(res).label} no estoque da cidade.`;
+      }
+    }
+  }
   return "";
 }
 
@@ -1210,6 +1218,17 @@ const cityResourcesHere = computed<CityResource[]>(() =>
       )
     : [],
 );
+
+/** Estoque de recursos da cidade que influencia o tile selecionado. */
+const influencingCityStock = computed<Map<string, number>>(() => {
+  const city = influencingCity.value;
+  if (!city) return new Map();
+  return new Map(
+    cityResources.value
+      .filter((r) => r.x === city.x && r.y === city.y)
+      .map((r) => [r.resource, r.amount]),
+  );
+});
 
 /** Nº de celeiros de uma cidade (define a capacidade de comida). */
 function granaryCount(city: City): number {
@@ -1356,6 +1375,14 @@ function costOf(kind: ConstructionKind) {
   return constructionCost(kind, playerAlignment.value, selected.value?.resource);
 }
 
+/** Manutenção por turno de uma construção, já com o desconto do direcionamento. */
+function upkeepOf(kind: ConstructionKind): number {
+  return Math.round(
+    CONSTRUCTIONS[kind].upkeep *
+      ALIGNMENT_ECONOMY[playerAlignment.value].upkeepMult,
+  );
+}
+
 /** Atribui (ou limpa, com `null`) o setor do tile selecionado. */
 async function doAssignSector(sector: Sector | null) {
   const p = selected.value;
@@ -1398,6 +1425,7 @@ async function doQueueConstruction(
       p.resource,
     );
     constructionOrders.value = await loadConstructionOrders(props.saveId);
+    cityResources.value = await loadCityResources(props.saveId);
     factions.value = await loadFactions(props.saveId);
     flashToast(`${CONSTRUCTIONS[kind].label} enfileirada para construção.`);
   } catch (e) {
@@ -1414,6 +1442,7 @@ async function doCancelConstruction(orderId: number) {
   try {
     await cancelConstruction(orderId);
     constructionOrders.value = await loadConstructionOrders(props.saveId);
+    cityResources.value = await loadCityResources(props.saveId);
     factions.value = await loadFactions(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -1552,10 +1581,11 @@ const incomeSummary = computed(() => {
   const commercialIncome = Math.round(
     commercial * econ.commercialMult * (1 + bonus.commercial) * prosMult,
   );
-  // Manutenção das construções erguidas — despesa fixa por turno.
-  const constructionUpkeep = playerCons.reduce(
-    (s, c) => s + CONSTRUCTIONS[c.kind].upkeep,
-    0,
+  // Manutenção das construções erguidas — despesa fixa por turno, com o
+  // desconto de manutenção do direcionamento.
+  const constructionUpkeep = Math.round(
+    playerCons.reduce((s, c) => s + CONSTRUCTIONS[c.kind].upkeep, 0) *
+      econ.upkeepMult,
   );
   return {
     tax: taxIncome,
@@ -3703,7 +3733,14 @@ function provinceFill(p: Province): string {
                       💰 {{ costOf(c.kind).moneyCost }}
                     </span>
                     <span title="Manutenção por turno">
-                      🔧 {{ c.upkeep }}/turno
+                      🔧 {{ upkeepOf(c.kind) }}/turno
+                    </span>
+                    <span
+                      v-for="(amt, res) in c.resourceCost"
+                      :key="res"
+                      :title="`Consome ${resourceLabel(res).label} do estoque da cidade ao construir`"
+                    >
+                      {{ resourceLabel(res).icon }} {{ amt }}
                     </span>
                     <span v-if="c.energyCost" title="Energia consumida">
                       ⚡ {{ c.energyCost }}

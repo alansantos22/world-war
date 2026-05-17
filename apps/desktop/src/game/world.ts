@@ -1100,11 +1100,6 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   // ===== Cidades, construções e economia =====
   const cities = await loadCities(saveId);
   const constructions = await loadConstructions(saveId);
-  // Cada construção erguida soma a sua manutenção ao custo da facção.
-  for (const con of constructions) {
-    const cost = CONSTRUCTIONS[con.kind].upkeep;
-    upkeep.set(con.ownerCode, (upkeep.get(con.ownerCode) ?? 0) + cost);
-  }
   const constructionOrders = await loadConstructionOrders(saveId);
   const cityResources = await loadCityResources(saveId);
   const factionByCode = new Map(factions.map((f) => [f.code, f]));
@@ -1117,6 +1112,21 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   }
   const alignOf = (code: string): AlignmentId =>
     alignmentByCode.get(code) ?? 'INDEPENDENTE';
+
+  // Manutenção das construções erguidas — somada ao custo do exército, já com
+  // o desconto de manutenção do direcionamento (comunismo −20%, estados
+  // independentes −15%).
+  const consUpkeepRaw = new Map<string, number>();
+  for (const con of constructions) {
+    consUpkeepRaw.set(
+      con.ownerCode,
+      (consUpkeepRaw.get(con.ownerCode) ?? 0) + CONSTRUCTIONS[con.kind].upkeep,
+    );
+  }
+  for (const [code, raw] of consUpkeepRaw) {
+    const mult = ALIGNMENT_ECONOMY[alignOf(code)].upkeepMult;
+    upkeep.set(code, (upkeep.get(code) ?? 0) + Math.round(raw * mult));
+  }
 
   // Bônus de ganhos (Banco/Bolsa/Agência bancária) de cada facção.
   const bonusByFaction = new Map<string, ReturnType<typeof areaBonus>>();

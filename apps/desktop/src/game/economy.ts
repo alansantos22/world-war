@@ -158,24 +158,42 @@ export interface AlignmentEconomy {
   industrialMult: number;
   /** Multiplica os ganhos de dinheiro de zonas agrícolas. */
   agriculturalMult: number;
+  /** Multiplica a manutenção por turno das construções da facção. */
+  upkeepMult: number;
 }
 
 export const ALIGNMENT_ECONOMY: Record<AlignmentId, AlignmentEconomy> = {
-  REPUBLICA: { taxMult: 1, commercialMult: 1, industrialMult: 1, agriculturalMult: 1 },
-  IMPERIO: { taxMult: 1, commercialMult: 1, industrialMult: 1, agriculturalMult: 1 },
-  // Empobrecimento: impostos e zonas rendem bem menos.
+  REPUBLICA: {
+    taxMult: 1,
+    commercialMult: 1,
+    industrialMult: 1,
+    agriculturalMult: 1,
+    upkeepMult: 1,
+  },
+  IMPERIO: {
+    taxMult: 1,
+    commercialMult: 1,
+    industrialMult: 1,
+    agriculturalMult: 1,
+    upkeepMult: 1,
+  },
+  // Empobrecimento: impostos e zonas rendem bem menos. Buff "Materiais mais
+  // baratos": manutenção das construções 20% menor.
   COMUNISTA: {
     taxMult: 0.4,
     commercialMult: 0.4,
     industrialMult: 0.5,
     agriculturalMult: 1,
+    upkeepMult: 0.8,
   },
-  // Economia liberal: zonas rendem mais.
+  // Economia liberal: zonas rendem mais. Buff "Abertura de concorrência":
+  // manutenção das construções 15% menor.
   INDEPENDENTE: {
     taxMult: 1,
     commercialMult: 1.2,
     industrialMult: 1.1,
     agriculturalMult: 1.1,
+    upkeepMult: 0.85,
   },
 };
 
