@@ -13,7 +13,19 @@ import { TROOP_TYPES } from './squads';
  * donos iniciais (capitais) são sorteados de novo.
  */
 
-export const GRID = { cols: 50, rows: 24 };
+/**
+ * Quanto o mapa é ampliado em relação ao desenho-base (50×24). Com `2`, o
+ * mundo tem 100×48 células — cada célula-base vira um bloco 2×2.
+ */
+export const MAP_SCALE = 2;
+
+/** Desenho-base do mundo, antes da ampliação por `MAP_SCALE`. */
+const BASE_GRID = { cols: 50, rows: 24 };
+
+export const GRID = {
+  cols: BASE_GRID.cols * MAP_SCALE,
+  rows: BASE_GRID.rows * MAP_SCALE,
+};
 
 /**
  * Linha do equador. Províncias com `y < EQUATOR_ROW` ficam no hemisfério
@@ -78,13 +90,14 @@ export const CONTINENT_NAMES: Record<string, string> = {
   O: 'Oceania',
 };
 
-// Desenho dos continentes: cada entrada é [linha, colInicio, colFim].
-const LAND: Record<string, number[][]> = {
+// Desenho-base dos continentes (grade 50×24): [linha, colInício, colFim].
+const BASE_LAND: Record<string, number[][]> = {
   N: [
     [2, 6, 13], [3, 5, 15], [4, 4, 16], [5, 4, 16], [6, 5, 15],
-    [7, 6, 14], [8, 7, 13], [9, 8, 12], [10, 9, 12], [11, 9, 11],
-    // O istmo: liga a América do Norte à do Sul (col 13 encosta na col 14 da S).
-    [12, 10, 13],
+    [7, 6, 14], [8, 7, 13], [9, 8, 12], [10, 9, 12], [11, 9, 12],
+    // A América Central: istmo que liga a América do Norte à do Sul
+    // (a col 13 encosta na col 14 da América do Sul).
+    [12, 10, 13], [13, 11, 12],
   ],
   S: [
     [12, 14, 18], [13, 13, 19], [14, 12, 20], [15, 13, 19], [16, 13, 19],
@@ -107,6 +120,33 @@ const LAND: Record<string, number[][]> = {
     [14, 41, 46], [15, 40, 48], [16, 41, 47], [17, 42, 46], [18, 43, 45],
   ],
 };
+
+/**
+ * Amplia o desenho-base pelo `MAP_SCALE`: cada célula-base `[r, c]` vira um
+ * bloco `MAP_SCALE×MAP_SCALE`, mantendo a forma dos continentes.
+ */
+function scaleLand(
+  base: Record<string, number[][]>,
+): Record<string, number[][]> {
+  const out: Record<string, number[][]> = {};
+  for (const [continent, rows] of Object.entries(base)) {
+    const scaled: number[][] = [];
+    for (const [r, c0, c1] of rows) {
+      for (let dr = 0; dr < MAP_SCALE; dr++) {
+        scaled.push([
+          r * MAP_SCALE + dr,
+          c0 * MAP_SCALE,
+          c1 * MAP_SCALE + (MAP_SCALE - 1),
+        ]);
+      }
+    }
+    out[continent] = scaled;
+  }
+  return out;
+}
+
+// Continentes no tamanho real do mapa (desenho-base ampliado).
+const LAND: Record<string, number[][]> = scaleLand(BASE_LAND);
 
 const COMMON: ResourceType[] = [
   ResourceType.MADEIRA,

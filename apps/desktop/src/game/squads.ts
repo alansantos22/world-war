@@ -12,6 +12,7 @@
 
 import { getDb } from '../db';
 import { COLONO_COST, destroySettlerSquadsAt } from './cities';
+import { cityHasConstruction } from './constructions';
 
 /** Custo, em dinheiro, para montar um esquadrão. */
 export const SQUAD_COST = 500;
@@ -23,6 +24,14 @@ export const SQUAD_UPKEEP = 25;
 export const ATTACKS_PER_TURN = 2;
 /** Vida que cada tropa (e o comandante) recupera por turno numa cidade sua. */
 export const HP_REGEN_PER_TURN = 5;
+
+// ===== Construções militares (ver `constructions.ts`) =====
+/** Multiplicador de produção das tropas numa cidade com Quartel (+10%). */
+export const BARRACKS_PROD_PENALTY = 1.1;
+/** XP com que uma tropa nasce numa cidade com Quartel. */
+export const BARRACKS_TROOP_XP = 5;
+/** XP com que um comandante nasce numa cidade com Academia Militar. */
+export const ACADEMY_COMMANDER_XP = 15;
 
 // ===== Moral =====
 /** Moral máxima (e inicial) de um esquadrão, em pontos percentuais. */
@@ -439,6 +448,15 @@ export async function createSquad(
       `Manpower insuficiente para montar um esquadrão (${SQUAD_MANPOWER_COST}).`,
     );
   }
+  // A Academia Militar da cidade dá um comandante mais bem formado.
+  const academy = await cityHasConstruction(saveId, x, y, 'ACADEMIA');
+  let stars = COMMANDER_BASE.stars;
+  let xp = COMMANDER_BASE.xp;
+  if (academy) {
+    const r = Math.random();
+    stars = r < 0.02 ? 4 : r < 0.12 ? 3 : 2;
+    xp = ACADEMY_COMMANDER_XP;
+  }
   await db.execute('BEGIN');
   try {
     await db.execute(
@@ -458,12 +476,12 @@ export async function createSquad(
         x,
         y,
         currentTurn,
-        COMMANDER_BASE.stars,
+        stars,
         COMMANDER_BASE.force,
         COMMANDER_BASE.hp,
         COMMANDER_BASE.maxHp,
         COMMANDER_BASE.defense,
-        COMMANDER_BASE.xp,
+        xp,
         COMMANDER_BASE.tradition,
       ],
     );
@@ -680,6 +698,12 @@ export async function queueRecruit(
     throw new Error(`Manpower insuficiente (${troop.manpowerCost}).`);
   }
 
+  // Um Quartel deixa a produção 10% mais lenta (mas a tropa nasce treinada).
+  const barracks = await cityHasConstruction(saveId, x, y, 'BARRACKS');
+  const prodCost = barracks
+    ? Math.round(troop.productionCost * BARRACKS_PROD_PENALTY)
+    : troop.productionCost;
+
   await db.execute('BEGIN');
   try {
     await db.execute(
@@ -692,7 +716,7 @@ export async function queueRecruit(
       `INSERT INTO recruit_orders
          (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done)
        VALUES (?, ?, ?, ?, 0, ?, ?, 0)`,
-      [saveId, x, y, ownerCode, kind, troop.productionCost],
+      [saveId, x, y, ownerCode, kind, prodCost],
     );
     await db.execute('COMMIT');
   } catch (e) {

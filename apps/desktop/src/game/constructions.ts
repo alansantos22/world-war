@@ -26,7 +26,8 @@ export type Sector =
   | 'URBANO'
   | 'COMERCIAL'
   | 'RELIGIOSO'
-  | 'MILITAR';
+  | 'MILITAR'
+  | 'PESQUISA';
 
 export interface SectorInfo {
   id: Sector;
@@ -41,9 +42,23 @@ export const SECTORS: Record<Sector, SectorInfo> = {
   COMERCIAL: { id: 'COMERCIAL', label: 'Comercial', icon: '🏬' },
   RELIGIOSO: { id: 'RELIGIOSO', label: 'Religioso', icon: '⛪' },
   MILITAR: { id: 'MILITAR', label: 'Militar', icon: '🏰' },
+  PESQUISA: { id: 'PESQUISA', label: 'Pesquisa', icon: '🔬' },
 };
 
 export const SECTOR_LIST: SectorInfo[] = Object.values(SECTORS);
+
+/** Direcionamentos políticos em que um setor não pode ser escolhido. */
+export const SECTOR_FORBIDDEN: Partial<Record<Sector, AlignmentId[]>> = {
+  RELIGIOSO: ['COMUNISTA'],
+};
+
+/** `true` se um setor é proibido para um direcionamento político. */
+export function isSectorForbidden(
+  sector: Sector,
+  alignment: AlignmentId,
+): boolean {
+  return SECTOR_FORBIDDEN[sector]?.includes(alignment) ?? false;
+}
 
 // ===== Construções =====
 
@@ -79,7 +94,26 @@ export type ConstructionKind =
   | 'BOLSA'
   | 'AGENCIA_BANCARIA'
   | 'MERCADO_EXTERIOR'
-  | 'MERCADO_MILITAR';
+  | 'MERCADO_MILITAR'
+  // Religioso
+  | 'TEMPLO'
+  | 'CATEDRAL'
+  | 'MONUMENTO'
+  // Militar
+  | 'BARRACKS'
+  | 'ACADEMIA'
+  | 'FAB_ARMAMENTO'
+  | 'FAB_ARMADURA'
+  | 'FORTIFICACAO'
+  | 'MURALHA'
+  | 'SILO_MISSEIS'
+  // Pesquisa
+  | 'ESCOLA'
+  | 'BIBLIOTECA'
+  | 'OBSERVATORIO'
+  | 'UNIVERSIDADE'
+  | 'LAB_MILITAR'
+  | 'CENTRO_PESQUISA';
 
 /** Variantes do pasto — o rebanho criado. */
 export type PastureVariant = 'GADO' | 'OVELHA' | 'PORCO';
@@ -106,8 +140,17 @@ export interface ConstructionType {
   requiresResearch: string | null;
   /** Cultura gerada por turno. */
   culturePerTurn?: number;
+  /** Pontos de pesquisa gerados por turno. */
+  researchPerTurn?: number;
   /** Dinheiro gerado por turno. */
   moneyPerTurn?: number;
+  /**
+   * Fração somada ao crescimento de prosperidade da facção (pode ser negativa
+   * — moradia adensada reduz a prosperidade). Ver `economy.ts`.
+   */
+  prosperityGrowth?: number;
+  /** Pontos de felicidade que a construção soma à cidade. */
+  happiness?: number;
   /** Pontos de energia gerados (usinas). */
   energyOutput?: number;
   /** Pontos de energia consumidos para funcionar. */
@@ -271,6 +314,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
       '+500 mil no teto de população (+750 mil no comunismo).',
     requiresResearch: null,
     popCap: 500_000,
+    prosperityGrowth: -0.03,
   },
   AREA_URBANA: {
     kind: 'AREA_URBANA',
@@ -285,6 +329,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
       '+500 mil no teto de população (+800 mil nos estados independentes).',
     requiresResearch: null,
     popCap: 500_000,
+    prosperityGrowth: -0.02,
   },
   MUSEU: {
     kind: 'MUSEU',
@@ -297,6 +342,8 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description: 'Gera 2 de cultura por turno (relíquias e felicidade em breve).',
     requiresResearch: null,
     culturePerTurn: 2,
+    prosperityGrowth: 0.03,
+    happiness: 2,
   },
   TEATRO: {
     kind: 'TEATRO',
@@ -309,6 +356,8 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description: 'Gera 5 de cultura por turno.',
     requiresResearch: null,
     culturePerTurn: 5,
+    prosperityGrowth: 0.03,
+    happiness: 4,
   },
   CENTRO_POLICIAL: {
     kind: 'CENTRO_POLICIAL',
@@ -345,6 +394,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     requiresResearch: null,
     culturePerTurn: 4,
     energyCost: 1,
+    happiness: 3,
   },
   TV: {
     kind: 'TV',
@@ -358,6 +408,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     requiresResearch: null,
     culturePerTurn: 7,
     energyCost: 1,
+    happiness: 5,
   },
   // ===== Comercial =====
   MERCADO_LOCAL: {
@@ -371,6 +422,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description: 'Gera 500 de dinheiro por turno.',
     requiresResearch: null,
     moneyPerTurn: 500,
+    prosperityGrowth: 0.02,
   },
   SHOPPING: {
     kind: 'SHOPPING',
@@ -384,6 +436,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description: 'Gera 900 de dinheiro por turno.',
     requiresResearch: null,
     moneyPerTurn: 900,
+    prosperityGrowth: 0.04,
   },
   ZONA_COMERCIAL: {
     kind: 'ZONA_COMERCIAL',
@@ -398,6 +451,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
       'Gera 1.250 de dinheiro por turno (1.700 nos estados independentes).',
     requiresResearch: null,
     moneyPerTurn: 1250,
+    prosperityGrowth: 0.05,
   },
   BANCO: {
     kind: 'BANCO',
@@ -412,6 +466,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description:
       '+30% (império/república) ou +20% nos ganhos das zonas comerciais.',
     requiresResearch: null,
+    prosperityGrowth: 0.06,
   },
   BOLSA: {
     kind: 'BOLSA',
@@ -426,6 +481,7 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description:
       '+15% (+30% nos estados independentes) nos ganhos comerciais e industriais.',
     requiresResearch: null,
+    prosperityGrowth: 0.07,
   },
   AGENCIA_BANCARIA: {
     kind: 'AGENCIA_BANCARIA',
@@ -463,9 +519,226 @@ export const CONSTRUCTIONS: Record<ConstructionKind, ConstructionType> = {
     description: 'Permite comprar tropas e armas de outras facções (em breve).',
     requiresResearch: null,
   },
+  // ===== Religioso =====
+  TEMPLO: {
+    kind: 'TEMPLO',
+    label: 'Templo',
+    icon: '⛩️',
+    sector: 'RELIGIOSO',
+    prodCost: 200,
+    moneyCost: 2500,
+    maxPerTile: 1,
+    description: 'Aumenta a felicidade da cidade; ordem e influência religiosa em breve.',
+    requiresResearch: null,
+    happiness: 3,
+  },
+  CATEDRAL: {
+    kind: 'CATEDRAL',
+    label: 'Catedral',
+    icon: '⛪',
+    sector: 'RELIGIOSO',
+    prodCost: 600,
+    moneyCost: 12000,
+    maxPerTile: 1,
+    description: 'Aumenta a ordem e muito a influência religiosa (em breve).',
+    requiresResearch: null,
+  },
+  MONUMENTO: {
+    kind: 'MONUMENTO',
+    label: 'Monumento',
+    icon: '🗿',
+    sector: 'RELIGIOSO',
+    prodCost: 500,
+    moneyCost: 10000,
+    maxPerTile: 1,
+    description: 'Aumenta a influência religiosa da facção (em breve).',
+    requiresResearch: null,
+  },
+  // ===== Militar =====
+  BARRACKS: {
+    kind: 'BARRACKS',
+    label: 'Quartel',
+    icon: '🪖',
+    sector: 'MILITAR',
+    prodCost: 550,
+    moneyCost: 6500,
+    maxPerTile: 1,
+    description:
+      'As tropas da cidade custam +10% de produção, mas nascem com 5 de experiência.',
+    requiresResearch: null,
+  },
+  ACADEMIA: {
+    kind: 'ACADEMIA',
+    label: 'Academia Militar',
+    icon: '🎓',
+    sector: 'MILITAR',
+    prodCost: 500,
+    moneyCost: 10000,
+    maxPerTile: 1,
+    description:
+      'Comandantes montados na cidade nascem com 2★ (chance de 3★/4★) e 15 de experiência.',
+    requiresResearch: null,
+  },
+  FAB_ARMAMENTO: {
+    kind: 'FAB_ARMAMENTO',
+    label: 'Fábrica de armamento',
+    icon: '🔫',
+    sector: 'MILITAR',
+    prodCost: 1100,
+    moneyCost: 15000,
+    maxPerTile: 1,
+    description: 'Libera a produção de armas (em breve). Consome 2 de energia.',
+    requiresResearch: null,
+    energyCost: 2,
+  },
+  FAB_ARMADURA: {
+    kind: 'FAB_ARMADURA',
+    label: 'Fábrica de armaduras',
+    icon: '🛡️',
+    sector: 'MILITAR',
+    prodCost: 1200,
+    moneyCost: 19000,
+    maxPerTile: 1,
+    description:
+      'Libera a produção de armaduras (em breve). Consome 2 de energia.',
+    requiresResearch: null,
+    energyCost: 2,
+  },
+  FORTIFICACAO: {
+    kind: 'FORTIFICACAO',
+    label: 'Fortificação',
+    icon: '🏯',
+    sector: 'MILITAR',
+    prodCost: 2500,
+    moneyCost: 28000,
+    maxPerTile: 1,
+    description: 'Reforça a defesa da cidade no cerco (em breve).',
+    requiresResearch: null,
+  },
+  MURALHA: {
+    kind: 'MURALHA',
+    label: 'Muralhas de concreto',
+    icon: '🧱',
+    sector: 'MILITAR',
+    prodCost: 4000,
+    moneyCost: 40000,
+    maxPerTile: 1,
+    description: 'Reforça muito a defesa da cidade no cerco (em breve).',
+    requiresResearch: null,
+  },
+  SILO_MISSEIS: {
+    kind: 'SILO_MISSEIS',
+    label: 'Silo de mísseis',
+    icon: '🚀',
+    sector: 'MILITAR',
+    prodCost: 2500,
+    moneyCost: 26000,
+    maxPerTile: 1,
+    description: 'Armazena e lança mísseis contra inimigos (em breve).',
+    requiresResearch: null,
+  },
+  // ===== Pesquisa =====
+  ESCOLA: {
+    kind: 'ESCOLA',
+    label: 'Escola',
+    icon: '🏫',
+    sector: 'PESQUISA',
+    prodCost: 150,
+    moneyCost: 1500,
+    maxPerTile: 1,
+    forbidden: ['INDEPENDENTE'],
+    description: 'Gera 2 de pesquisa por turno. Pode ser erguida na cidade.',
+    requiresResearch: null,
+    researchPerTurn: 2,
+  },
+  BIBLIOTECA: {
+    kind: 'BIBLIOTECA',
+    label: 'Biblioteca',
+    icon: '📚',
+    sector: 'PESQUISA',
+    prodCost: 220,
+    moneyCost: 2800,
+    maxPerTile: 1,
+    forbidden: ['INDEPENDENTE'],
+    description: 'Gera 3 de pesquisa por turno. Pode ser erguida na cidade.',
+    requiresResearch: null,
+    researchPerTurn: 3,
+  },
+  OBSERVATORIO: {
+    kind: 'OBSERVATORIO',
+    label: 'Observatório',
+    icon: '🔭',
+    sector: 'PESQUISA',
+    prodCost: 380,
+    moneyCost: 5500,
+    maxPerTile: 1,
+    description: 'Gera 5 de pesquisa por turno.',
+    requiresResearch: null,
+    researchPerTurn: 5,
+  },
+  UNIVERSIDADE: {
+    kind: 'UNIVERSIDADE',
+    label: 'Universidade',
+    icon: '🎓',
+    sector: 'PESQUISA',
+    prodCost: 650,
+    moneyCost: 9500,
+    maxPerTile: 1,
+    description: 'Gera 8 de pesquisa por turno.',
+    requiresResearch: null,
+    researchPerTurn: 8,
+    prosperityGrowth: 0.02,
+  },
+  LAB_MILITAR: {
+    kind: 'LAB_MILITAR',
+    label: 'Laboratório militar',
+    icon: '🧪',
+    sector: 'PESQUISA',
+    prodCost: 950,
+    moneyCost: 14000,
+    maxPerTile: 1,
+    description: 'Gera 12 de pesquisa por turno.',
+    requiresResearch: null,
+    researchPerTurn: 12,
+  },
+  CENTRO_PESQUISA: {
+    kind: 'CENTRO_PESQUISA',
+    label: 'Centro de pesquisas',
+    icon: '🔬',
+    sector: 'PESQUISA',
+    prodCost: 1150,
+    moneyCost: 18000,
+    maxPerTile: 1,
+    description: 'Gera 15 de pesquisa por turno.',
+    requiresResearch: null,
+    researchPerTurn: 15,
+  },
 };
 
 export const CONSTRUCTION_LIST: ConstructionType[] = Object.values(CONSTRUCTIONS);
+
+/**
+ * Construções que podem ser erguidas **direto no tile da cidade** (sem precisar
+ * de um tile de setor) — o centro urbano, estilo *Civilization*.
+ */
+export const CITY_BUILDABLE: ReadonlySet<ConstructionKind> = new Set<ConstructionKind>([
+  'MUSEU',
+  'TEATRO',
+  'ESCOLA',
+  'BIBLIOTECA',
+  'AREA_URBANA',
+  'CONJUNTO',
+  'RADIO',
+  'TV',
+  'SHOPPING',
+  'MERCADO_LOCAL',
+  'TEMPLO',
+]);
+
+/** `true` se a construção pode ser erguida no tile da cidade. */
+export function isCityBuildable(kind: ConstructionKind): boolean {
+  return CITY_BUILDABLE.has(kind);
+}
 
 // ===== Constantes de produção =====
 
@@ -788,6 +1061,22 @@ export async function constructionsOnTile(
   return (built[0]?.n ?? 0) + (queued[0]?.n ?? 0);
 }
 
+/** `true` se uma cidade tem (ao menos uma) construção erguida de um tipo. */
+export async function cityHasConstruction(
+  saveId: number,
+  cityX: number,
+  cityY: number,
+  kind: ConstructionKind,
+): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ n: number }[]>(
+    `SELECT COUNT(*) AS n FROM constructions
+      WHERE save_id = ? AND city_x = ? AND city_y = ? AND kind = ?`,
+    [saveId, cityX, cityY, kind],
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
 /** Quantas construções de um tipo uma facção já tem (erguidas + na fila). */
 export async function constructionsOfFaction(
   saveId: number,
@@ -815,8 +1104,14 @@ export async function assignSector(
   x: number,
   y: number,
   sector: Sector | null,
+  alignment?: AlignmentId,
 ): Promise<void> {
   const db = await getDb();
+  if (sector && alignment && isSectorForbidden(sector, alignment)) {
+    throw new Error(
+      `O setor ${SECTORS[sector].label} não é permitido pelo seu direcionamento.`,
+    );
+  }
   const built = await db.select<{ n: number }[]>(
     'SELECT COUNT(*) AS n FROM constructions WHERE save_id = ? AND x = ? AND y = ?',
     [saveId, x, y],

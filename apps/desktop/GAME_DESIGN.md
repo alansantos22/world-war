@@ -33,8 +33,9 @@ eventos e a diplomacia ainda serão implementados.
 
 ### Grade
 
-O mundo é uma grade fixa de **50 × 24 células** (`GRID` em
-[`src/game/map-generator.ts`](src/game/map-generator.ts)). O desenho dos 6
+O mundo é uma grade fixa de **100 × 48 células** (`GRID` em
+[`src/game/map-generator.ts`](src/game/map-generator.ts)) — o desenho-base
+(`BASE_LAND`, 50 × 24) ampliado por `MAP_SCALE` (2×). O desenho dos 6
 continentes é fixo:
 
 | Código | Continente        |
@@ -50,7 +51,8 @@ continentes é fixo:
 
 **Cada célula de terra é uma província individual** — a unidade básica do
 jogo. Uma província pode ser possuída por uma nação (ou ficar neutra), tem um
-nome próprio e um recurso. São ~400 províncias no total.
+nome próprio e um recurso. São ~1.600 províncias no total. As Américas do Norte
+e do Sul são ligadas por um istmo — a **América Central**.
 
 A cada "Novo mapa" o desenho dos continentes é o mesmo, mas os **nomes**, os
 **recursos** e as **capitais** são sorteados de novo.
@@ -86,29 +88,21 @@ fica limpo, sem ícones de recurso (nem dos raros).
 
 > **Planejado:** efeito dos recursos na economia/produção de cada nação.
 
-### Produção do território
+### Produção: tudo vem das cidades
 
-Além do recurso, **cada província produz cinco valores por turno**
-(definidos em [`src/game/economy.ts`](src/game/economy.ts), sorteados na
-geração do mapa):
+Uma província **sem cidade** é só território — **não produz nada**. Toda a
+produção (industrial, comida, cultura, pesquisa, manpower, recursos, dinheiro)
+vem das **cidades** e das suas **construções** (ver seções 12 e 13). Cada
+cidade tem valores-base e cresce com a população:
 
-| Valor               | Descrição                                              |
-|---------------------|--------------------------------------------------------|
-| Manpower / turno    | *Legado* — o manpower agora vem das **cidades** (seção 12); o valor segue sorteado mas não é mais acumulado. |
-| Recurso local       | Quanto do recurso da província é produzido.            |
-| Produção            | Produção industrial estilo *Civilization* — usada pela cidade na **fila de produção** (tropas e colonos). |
-| Pesquisa / turno    | Pontos de pesquisa gerados pela província.             |
-| Cultura / turno     | Cultura gerada pela província.                         |
+| Valor          | Capital | Cidade | Cresce com |
+|----------------|---------|--------|------------|
+| Produção       | 40      | 25     | +1 a cada 25 mil de população; zonas de fábrica |
+| Cultura/turno  | 5       | 2      | museu, teatro, rádio, TV |
+| Recurso local  | 2 (1 raro) | 1 (0 raro) | — extrai o recurso do próprio tile |
 
-As **capitais produzem o dobro** de cada valor. Os números são sorteados a
-cada "Novo mapa" e ficam visíveis no painel da província. A produção do
-**recurso local** ainda recebe um **bônus de clima** (ver seção 10).
-
-A cada turno (ver seção 9), a **pesquisa** e a **cultura** produzidas são
-somadas aos valores da facção dona. O **manpower** deixou de vir das províncias
-— agora é gerado pelas **cidades** (1% da população — ver seção 12). "Recurso
-local" ainda **não é acumulado** — fica reservado para mecânicas futuras
-(efeito dos recursos).
+`Manpower` (1% da população) e `pesquisa` também vêm das cidades. As colunas
+de produção sorteadas das províncias ficam como **dado legado**, sem uso.
 
 ---
 
@@ -546,17 +540,10 @@ O jogo avança por **turnos**, geridos em
 
 ### O que acontece a cada turno
 
-Cada facção recebe a produção das suas províncias somada aos seus valores:
-
-- **Pesquisa** += soma da pesquisa produzida pelas suas províncias.
-- **Cultura** += soma da cultura produzida pelas suas províncias.
-
-As **capitais já produzem o dobro** (regra da geração do mapa — seção 2),
-então esse bônus entra naturalmente na soma.
-
 Cada **cidade** processa o seu **ciclo de turno** — comida, crescimento da
-população e manpower (ver seção 12). O **manpower** que a facção ganha vem daí:
-1% da população nova quando uma cidade cresce.
+população, manpower, e rende **cultura**, **pesquisa**, **dinheiro** e
+**recursos** à facção (ver seções 12 e 13). Províncias sem cidade não rendem
+nada. O **manpower** vem do crescimento (1% da população nova).
 
 Cada facção também **paga a manutenção** do seu exército em **dinheiro** (ver
 seção 11): 25 por esquadrão + 10 por tropa, e ainda as tropas do inventário —
@@ -1023,16 +1010,19 @@ e receber **construções**. Definido em
 > O catálogo já prevê o **sistema de pesquisa** futuro: cada construção tem o
 > campo `requiresResearch` (hoje sempre nulo — tudo destravado).
 
-### Setores
+### Setores e o tile da cidade
 
-Cada tile da zona de influência pode ser especializado num dos **6 setores**:
-**agrícola**, **industrial**, **urbano**, **comercial**, **religioso** e
-**militar**. Ao clicar num tile seu dentro da zona de influência, o botão
-**🏗️ Escolher especialização** abre o painel de especialização à direita.
-Atribuir um setor é grátis; só dá para trocar o setor de um tile **sem
-construções**. Hoje os setores **agrícola**, **industrial**, **urbano** e
-**comercial** têm construções; **religioso** e **militar** são selecionáveis,
-mas vazios (gap).
+Os tiles **vizinhos** da zona de influência podem ser especializados num dos
+**7 setores**: **agrícola**, **industrial**, **urbano**, **comercial**,
+**religioso**, **militar** e **pesquisa**. O **tile da cidade** é diferente —
+nele não se escolhe setor; ele hospeda direto as **construções da cidade**
+(museu, teatro, escola, biblioteca, área urbana, conjunto habitacional, rádio,
+TV, shopping, mercado local e templo), estilo *Civilization*.
+
+Ao clicar num tile seu dentro da zona de influência, o botão **🏗️** abre o
+painel de especialização à direita. Atribuir um setor é grátis; só dá para
+trocar o setor de um tile **sem construções**. O setor **religioso** é
+**proibido no comunismo**.
 
 ### Construções
 
@@ -1076,6 +1066,25 @@ comerciais e industriais); Agência bancária (150/8.000, +10% nos ganhos
 comerciais/industriais — exige o Banco Nacional); Mercado exterior
 (300/6.000, 1/facção) e Mercado militar (200/4.000, 1/facção) — comércio entre
 facções *(gap)*.
+
+**Religioso** (proibido no comunismo) — Templo (200/2.500); Catedral
+(600/12.000); Monumento (500/10.000). Aumentam felicidade, ordem e influência
+religiosa *(efeitos como gap)*.
+
+**Militar** — Quartel (550/6.500 — as tropas da cidade custam +10% de produção,
+mas nascem com 5 de XP); Academia Militar (500/10.000 — comandantes da cidade
+nascem com 2★, 10% de chance de 3★, 2% de 4★, e 15 de XP); Fábrica de armamento
+(1.100/15.000, 2 energia) e Fábrica de armaduras (1.200/19.000, 2 energia) —
+liberam armas/armaduras *(gap)*; Fortificação (2.500/28.000), Muralhas de
+concreto (4.000/40.000) e Silo de mísseis (2.500/26.000) — defesa e mísseis no
+cerco *(gap)*.
+
+**Pesquisa** — Escola (150/1.500, +2 pesquisa) e Biblioteca (220/2.800, +3
+pesquisa) — também construíveis no tile da cidade, **proibidas aos estados
+independentes**; Observatório (380/5.500, +5); Universidade (650/9.500, +8);
+Laboratório militar (950/14.000, +12); Centro de pesquisas (1.150/18.000, +15).
+Só os **estados independentes** geram pesquisa **sem** setor — cada cidade sua
+rende +5 de pesquisa por turno (em troca, não constroem Escola nem Biblioteca).
 
 A mina só pode ser erguida em tiles de **mineral** (exclui Madeira e Terras
 Agrícolas). Os minerais e produtos (couro, lã) vão para o **inventário de
@@ -1125,14 +1134,45 @@ comerciais (+30% em império/república, +20% nos demais); a **Bolsa de valores*
 reforça comércio e indústria (+15%, ou +30% nos estados independentes); cada
 **Agência bancária** soma +10% a ambos.
 
-A **felicidade** (50 de base + o modificador do imposto) já é exibida, mas
-ainda **não afeta** o jogo — vai influenciar o crescimento da população
-futuramente (gap).
+### Felicidade
 
-> **Gaps futuros:** construções dos setores religioso e militar; sistemas de
-> **prosperidade**, **ordem**, **lealdade**, **relíquias** (sítios
-> arqueológicos) e **comércio entre facções** (mercado exterior/militar,
-> empréstimos do banco); políticas e leis por direcionamento; efeito da
+Cada **cidade** tem a sua felicidade (0–100): `50` de base, mais o modificador
+do **imposto** (ver `TAX_LEVELS`), mais os pontos das suas **construções** —
+Teatro +4, TV +5, Templo/Rádio +3, Museu +2. A felicidade da **facção** é a
+**média** das felicidades das suas cidades, e é ela que define o **teto de
+prosperidade**. Ainda **não afeta** o crescimento da população (gap).
+
+### Prosperidade
+
+A **prosperidade** (0–100) é um valor da facção que **multiplica a renda** de
+impostos e de zonas comerciais. É exibida no painel **Economia**.
+
+- **Teto** — depende do direcionamento (república 90, império 85, comunista 60,
+  estados independentes 100) e da felicidade: `−5` se a felicidade < 100, `−20`
+  se < 50.
+- **Início** — cada nação começa com 40% do seu teto; estados independentes com
+  70%, comunistas com 30%.
+- **Crescimento** — `0,1` por turno, ajustado pelo imposto (mínimo ×1,2, médio
+  ×1,0, alto ×0,75, extremamente alto ×0,40) e por construções (Banco +6%,
+  Bolsa +7%, Zona comercial +5%, Shopping +4%, Teatro/Museu +3%,
+  Universidade/Mercado local +2%; Conjunto habitacional −3%, Área urbana −2%).
+  Se a prosperidade fica acima do teto (a felicidade caiu), ela **decai** 0,5
+  por turno; o piso é 10.
+- **Multiplicador de renda** — ≤10 ⇒ ×0,3; 10–25 ⇒ ×0,5; 25–40 ⇒ ×0,75;
+  40–50 ⇒ ×0,9; 50–60 ⇒ ×1,0; 60–70 ⇒ ×1,1; 70–80 ⇒ ×1,2; 80–85 ⇒ ×1,35;
+  85–90 ⇒ ×1,5; 90–99 ⇒ ×1,7; 100 ⇒ ×2,0.
+
+> **Gaps futuros:** **árvore de pesquisa** — dividida em pesquisas
+> **militares, civis, econômicas e industriais** (gastará o `researchPoints`);
+> **compra de tiles** — cada tile tem um preço, estados independentes pagam
+> **20% menos** e só conquistam comprando (não tomam à força); sistema de
+> **cerco** (cidades com pontos de vida — 200 por 100 mil de habitantes —,
+> pontos de defesa de fortificação/muralha que precisam cair antes da vida);
+> **devastação entre facções** (roubo de 10% do investido, reparo por 35% em
+> 3 turnos, tile devastado para de produzir); **fortalezas de tile**;
+> **mísseis**; **armas e armaduras** equipáveis; **influência religiosa** e
+> líder religioso; **ordem**, **lealdade**, **relíquias**;
+> **comércio entre facções**; políticas e leis por direcionamento; efeito da
 > felicidade no crescimento.
 
 ---
@@ -1186,11 +1226,12 @@ apps/desktop/src/
    esquadrões e **tomar** territórios neutros (ocupar ou devastar).
 6. ~~**Cidades**~~ **Implementado** (seção 12): fundar cidades com colonos,
    população, comida, zona de influência e ciclo de turno.
-7. ~~**Setores, construções e economia**~~ **Implementado** (seção 13):
-   especializar tiles; construções dos setores agrícola, industrial, urbano e
-   comercial; energia; impostos. Faltam os setores religioso e militar.
-8. **Pesquisa** — pontos de pesquisa que destravam construções e melhorias
-   (o campo `requiresResearch` das construções já é o gancho — seção 13).
+7. ~~**Setores, construções e economia**~~ **Implementado** (seção 13): os 7
+   setores (agrícola, industrial, urbano, comercial, religioso, militar,
+   pesquisa) com suas construções; energia; impostos; produção pelas cidades.
+8. **Árvore de pesquisa** — gastar os pontos de pesquisa em pesquisas
+   militares, civis, econômicas e industriais que destravam construções e
+   melhorias (o campo `requiresResearch` das construções é o gancho — seção 13).
 9. **Conquista e defesa entre facções** — tomar territórios de outras nações;
    o contra-ataque do defensor; e a **defesa das cidades** — hoje as tropas no
    **inventário** ainda *não* defendem o tile (só os esquadrões estacionados),

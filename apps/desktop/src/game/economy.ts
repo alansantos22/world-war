@@ -26,6 +26,8 @@ export interface FactionState {
   culture: number;
   /** Nível de imposto cobrado da população (ver `TAX_LEVELS`). */
   taxLevel: TaxLevel;
+  /** Prosperidade da nação (0–100) — multiplica a renda (ver `prosperity`). */
+  prosperity: number;
 }
 
 /**
@@ -40,6 +42,8 @@ export const STARTING_FACTION: Omit<FactionState, 'code'> = {
   researchPoints: 0,
   culture: 0,
   taxLevel: 'MEDIO',
+  // Valor real é definido por direcionamento em `insertFactions` (ver `initialProsperity`).
+  prosperity: 40,
 };
 
 /** Catálogo de exibição de um valor (facção ou território) na HUD. */
@@ -232,10 +236,25 @@ export function areaBonus(
 /** Felicidade-base de uma facção, antes do modificador do imposto. */
 export const BASE_HAPPINESS = 50;
 
-/** Felicidade resultante de um nível de imposto (0–100). */
+/** Felicidade-base resultante de um nível de imposto (0–100). */
 export function happinessFor(tax: TaxLevel): number {
   const h = BASE_HAPPINESS + TAX_LEVELS[tax].happinessModifier;
   return Math.max(0, Math.min(100, h));
+}
+
+/**
+ * Felicidade de uma **cidade**: a base do imposto mais os pontos de felicidade
+ * das suas construções (templo, museu, teatro, rádio, TV). A felicidade da
+ * **facção** é a média das felicidades das suas cidades.
+ */
+export function cityHappiness(
+  tax: TaxLevel,
+  constructionHappiness: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(100, BASE_HAPPINESS + TAX_LEVELS[tax].happinessModifier + constructionHappiness),
+  );
 }
 
 /**
@@ -251,4 +270,73 @@ export function cityTaxIncome(
   return Math.round(
     base * TAX_LEVELS[tax].moneyMultiplier * ALIGNMENT_ECONOMY[alignment].taxMult,
   );
+}
+
+// ===== Prosperidade =====
+
+/**
+ * A **prosperidade** (0–100) é um valor da facção que multiplica a renda de
+ * impostos e de zonas comerciais. Cresce devagar a cada turno e tem um teto
+ * que depende do direcionamento político e da felicidade.
+ */
+
+/** Teto-base de prosperidade de cada direcionamento. */
+export const PROSPERITY_MAX_BY_ALIGNMENT: Record<AlignmentId, number> = {
+  REPUBLICA: 90,
+  IMPERIO: 85,
+  COMUNISTA: 60,
+  INDEPENDENTE: 100,
+};
+
+/** Crescimento-base de prosperidade por turno. */
+export const PROSPERITY_BASE_GROWTH = 0.1;
+/** Prosperidade mínima (a queda nunca passa disto). */
+export const PROSPERITY_MIN = 10;
+/** Quanto a prosperidade decai por turno quando está acima do teto. */
+export const PROSPERITY_DECAY = 0.5;
+
+/**
+ * Teto efetivo de prosperidade: o teto do direcionamento menos a penalidade de
+ * felicidade — `−5` se a felicidade está abaixo de 100, `−20` se abaixo de 50.
+ */
+export function prosperityCap(
+  alignment: AlignmentId,
+  happiness: number,
+): number {
+  const base = PROSPERITY_MAX_BY_ALIGNMENT[alignment];
+  const penalty = happiness < 50 ? 20 : happiness < 100 ? 5 : 0;
+  return Math.max(PROSPERITY_MIN, base - penalty);
+}
+
+/** Prosperidade inicial de uma facção, conforme o direcionamento. */
+export function initialProsperity(alignment: AlignmentId): number {
+  const fraction =
+    alignment === 'INDEPENDENTE' ? 0.7 : alignment === 'COMUNISTA' ? 0.3 : 0.4;
+  return Math.round(PROSPERITY_MAX_BY_ALIGNMENT[alignment] * fraction);
+}
+
+/** Multiplicador do crescimento de prosperidade conferido pelo nível de imposto. */
+export function prosperityGrowthMult(tax: TaxLevel): number {
+  if (tax === 'MINIMO') return 1.2;
+  if (tax === 'ALTO') return 0.75;
+  if (tax === 'EXTREMO') return 0.4;
+  return 1; // MEDIO
+}
+
+/**
+ * Multiplicador da renda (impostos e zonas comerciais) conferido pela
+ * prosperidade — quanto mais próspera a nação, mais ela arrecada.
+ */
+export function prosperityIncomeMultiplier(prosperity: number): number {
+  if (prosperity <= 10) return 0.3;
+  if (prosperity <= 25) return 0.5;
+  if (prosperity <= 40) return 0.75;
+  if (prosperity <= 50) return 0.9;
+  if (prosperity <= 60) return 1;
+  if (prosperity <= 70) return 1.1;
+  if (prosperity <= 80) return 1.2;
+  if (prosperity <= 85) return 1.35;
+  if (prosperity <= 90) return 1.5;
+  if (prosperity < 100) return 1.7;
+  return 2;
 }

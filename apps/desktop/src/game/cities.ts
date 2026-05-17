@@ -125,6 +125,45 @@ export function cityPopCap(city: { isCapital: boolean }): number {
   return city.isCapital ? CAPITAL_POP_CAP : CITY_POP_CAP;
 }
 
+// ===== Produção da cidade =====
+
+/** Produção-base de uma cidade (capital 40, cidade comum 25). */
+export const CAPITAL_BASE_PRODUCTION = 40;
+export const CITY_BASE_PRODUCTION = 25;
+/** População que rende +1 de produção (mão de obra). */
+export const POP_PER_PRODUCTION = 25_000;
+/** Cultura-base gerada por turno (capital 5, cidade comum 2). */
+export const CAPITAL_BASE_CULTURE = 5;
+export const CITY_BASE_CULTURE = 2;
+/** Pesquisa passiva por cidade dos estados independentes. */
+export const INDEPENDENT_CITY_RESEARCH = 5;
+
+/**
+ * Produção intrínseca de uma cidade — base (capital/cidade) mais 1 por cada
+ * `POP_PER_PRODUCTION` de população. Zonas de fábrica somam por cima.
+ */
+export function cityProduction(city: {
+  isCapital: boolean;
+  population: number;
+}): number {
+  const base = city.isCapital ? CAPITAL_BASE_PRODUCTION : CITY_BASE_PRODUCTION;
+  return base + Math.floor(city.population / POP_PER_PRODUCTION);
+}
+
+/** Cultura-base gerada por uma cidade por turno (sem contar construções). */
+export function cityBaseCulture(city: { isCapital: boolean }): number {
+  return city.isCapital ? CAPITAL_BASE_CULTURE : CITY_BASE_CULTURE;
+}
+
+/**
+ * Quanto a cidade extrai do recurso local do seu tile por turno: capital 2
+ * (1 se for raro); cidade comum 1 (0 se for raro).
+ */
+export function cityResourceYield(isCapital: boolean, rare: boolean): number {
+  if (isCapital) return rare ? 1 : 2;
+  return rare ? 0 : 1;
+}
+
 /** Raio da zona de influência de uma cidade. */
 export function cityInfluence(city: { isCapital: boolean }): number {
   return city.isCapital ? CAPITAL_INFLUENCE : CITY_INFLUENCE;

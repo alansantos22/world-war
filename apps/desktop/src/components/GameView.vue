@@ -78,6 +78,9 @@ import {
   cityPopCap,
   cityFoodProduction,
   cityFoodConsumption,
+  cityProduction,
+  cityBaseCulture,
+  INDEPENDENT_CITY_RESEARCH,
   COLONO_COST,
   MIN_CITY_DISTANCE,
   type City,
@@ -92,8 +95,11 @@ import {
   cancelConstruction,
   constructionCost,
   constructionMaxPerTile,
+  constructionMoneyPerTurn,
   constructionPopCap,
   isConstructionForbidden,
+  isSectorForbidden,
+  isCityBuildable,
   resourceCapacity,
   farmFood,
   pastureFood,
@@ -113,13 +119,16 @@ import {
 } from "../game/constructions";
 import {
   FACTION_STATS,
-  TERRITORY_STATS,
   TAX_LEVELS,
   TAX_ORDER,
   allowedTaxLevels,
   clampTax,
   happinessFor,
+  cityHappiness,
   cityTaxIncome,
+  areaBonus,
+  prosperityCap,
+  prosperityIncomeMultiplier,
   ALIGNMENT_ECONOMY,
   FACTORY_BY_ALIGNMENT,
   type FactionState,
@@ -664,14 +673,14 @@ const recruitOrdersHere = computed<RecruitOrder[]>(() =>
 
 /** Turnos restantes para concluir uma ordem na cidade selecionada. */
 function recruitEta(o: RecruitOrder): number {
-  const prod = selected.value?.production ?? 0;
+  const prod = selectedCityEffProd.value;
   if (prod <= 0) return Infinity;
   return Math.ceil((o.prodCost - o.prodDone) / prod);
 }
 
 /** Turnos para construir, do zero, um item de dado custo de produção. */
 function buildTurns(prodCost: number): number {
-  const prod = selected.value?.production ?? 0;
+  const prod = selectedCityEffProd.value;
   if (prod <= 0) return Infinity;
   return Math.ceil(prodCost / prod);
 }
@@ -953,12 +962,27 @@ const constructionOrdersHere = computed<ConstructionOrder[]>(() =>
     : [],
 );
 
+/** Setores que o jogador pode escolher (alguns são vetados ao direcionamento). */
+const availableSectors = computed(() =>
+  SECTOR_LIST.filter((s) => !isSectorForbidden(s.id, playerAlignment.value)),
+);
+
 /** Todas as construções do setor do tile selecionado. */
 const sectorConstructions = computed<ConstructionType[]>(() => {
   const sector = selectedSector.value;
   if (!sector) return [];
   return CONSTRUCTION_LIST.filter((c) => c.sector === sector);
 });
+
+/**
+ * Construções listadas no painel de especialização: as do **centro urbano**
+ * quando o tile é a cidade, ou as do **setor** do tile.
+ */
+const panelConstructions = computed<ConstructionType[]>(() =>
+  selectedIsPlayerCity.value
+    ? CONSTRUCTION_LIST.filter((c) => isCityBuildable(c.kind))
+    : sectorConstructions.value,
+);
 
 /** Quantas construções de um tipo a facção do jogador tem (erguidas + na fila). */
 function factionConstructionCount(kind: ConstructionKind): number {
@@ -1094,19 +1118,51 @@ const selectedCityPopCap = computed(() => {
   return cap;
 });
 
+/** Cultura gerada pela cidade selecionada (base + museu/teatro/rádio/TV). */
+const selectedCityCulture = computed(() => {
+  const city = selectedCity.value;
+  if (!city) return 0;
+  let culture = cityBaseCulture(city);
+  for (const c of selectedCityConstructions.value) {
+    culture += CONSTRUCTIONS[c.kind].culturePerTurn ?? 0;
+  }
+  return culture;
+});
+
+/** Pesquisa gerada pela cidade selecionada (passiva dos independentes + construções). */
+const selectedCityResearch = computed(() => {
+  if (!selectedCity.value) return 0;
+  let research =
+    playerAlignment.value === "INDEPENDENTE" ? INDEPENDENT_CITY_RESEARCH : 0;
+  for (const c of selectedCityConstructions.value) {
+    research += CONSTRUCTIONS[c.kind].researchPerTurn ?? 0;
+  }
+  return research;
+});
+
+/** Felicidade da cidade selecionada (base do imposto + construções). */
+const selectedCityHappiness = computed(() => {
+  if (!selectedCity.value) return 0;
+  const bonus = selectedCityConstructions.value.reduce(
+    (s, c) => s + (CONSTRUCTIONS[c.kind].happiness ?? 0),
+    0,
+  );
+  return cityHappiness(playerTaxLevel.value, bonus);
+});
+
 /** Custo de uma construção no tile selecionado (varia com recurso e direcionamento). */
 function costOf(kind: ConstructionKind) {
   return constructionCost(kind, playerAlignment.value, selected.value?.resource);
 }
 
-/** Atribui um setor ao tile selecionado. */
-async function doAssignSector(sector: Sector) {
+/** Atribui (ou limpa, com `null`) o setor do tile selecionado. */
+async function doAssignSector(sector: Sector | null) {
   const p = selected.value;
   if (!p) return;
   busySquad.value = true;
   err.value = "";
   try {
-    await assignSector(props.saveId, p.x, p.y, sector);
+    await assignSector(props.saveId, p.x, p.y, sector, playerAlignment.value);
     provinces.value = await loadMap(props.saveId);
     selected.value =
       provinces.value.find((q) => q.x === p.x && q.y === p.y) ?? null;
@@ -1182,8 +1238,30 @@ const playerTaxOptions = computed<TaxLevel[]>(() =>
   allowedTaxLevels(playerAlignment.value),
 );
 
-/** Felicidade da facção do jogador, derivada do nível de imposto. */
-const playerHappiness = computed(() => happinessFor(playerTaxLevel.value));
+/** Felicidade da facção do jogador — média da felicidade das suas cidades. */
+const playerHappiness = computed(() => {
+  const code = game.value?.playerCode;
+  const myCities = cities.value.filter((c) => c.ownerCode === code);
+  if (myCities.length === 0) return happinessFor(playerTaxLevel.value);
+  let sum = 0;
+  for (const c of myCities) {
+    const bonus = constructions.value
+      .filter((x) => x.cityX === c.x && x.cityY === c.y)
+      .reduce((s, x) => s + (CONSTRUCTIONS[x.kind].happiness ?? 0), 0);
+    sum += cityHappiness(playerTaxLevel.value, bonus);
+  }
+  return Math.round(sum / myCities.length);
+});
+
+/** Prosperidade atual da facção do jogador. */
+const playerProsperity = computed(() =>
+  Math.round(playerFaction.value?.prosperity ?? 0),
+);
+
+/** Teto de prosperidade da facção do jogador. */
+const playerProsperityCap = computed(() =>
+  prosperityCap(playerAlignment.value, playerHappiness.value),
+);
 
 /** Resumo da renda por turno da facção do jogador. */
 const incomeSummary = computed(() => {
@@ -1191,17 +1269,44 @@ const incomeSummary = computed(() => {
   const align = playerAlignment.value;
   const factory = FACTORY_BY_ALIGNMENT[align];
   const econ = ALIGNMENT_ECONOMY[align];
+  const playerCons = constructions.value.filter((c) => c.ownerCode === code);
+  const bonus = areaBonus(
+    align,
+    playerCons.some((c) => c.kind === "BANCO"),
+    playerCons.some((c) => c.kind === "BOLSA"),
+    playerCons.filter((c) => c.kind === "AGENCIA_BANCARIA").length,
+  );
+  const prosMult = prosperityIncomeMultiplier(
+    playerFaction.value?.prosperity ?? 40,
+  );
   let tax = 0;
   let factoryMoney = 0;
+  let commercial = 0;
   for (const c of cities.value) {
     if (c.ownerCode !== code) continue;
     tax += cityTaxIncome(c.population, playerTaxLevel.value, align);
-    const factories = constructions.value.filter(
-      (x) => x.cityX === c.x && x.cityY === c.y && x.kind === "FABRICA",
-    ).length;
-    factoryMoney += Math.round(factories * factory.money * econ.industrialMult);
+    const cityCons = constructions.value.filter(
+      (x) => x.cityX === c.x && x.cityY === c.y,
+    );
+    factoryMoney += cityCons.filter((x) => x.kind === "FABRICA").length *
+      factory.money;
+    for (const x of cityCons) {
+      commercial += constructionMoneyPerTurn(x.kind, align);
+    }
   }
-  return { tax, factory: factoryMoney, total: tax + factoryMoney };
+  const taxIncome = Math.round(tax * prosMult);
+  const factoryIncome = Math.round(
+    factoryMoney * econ.industrialMult * (1 + bonus.industrial),
+  );
+  const commercialIncome = Math.round(
+    commercial * econ.commercialMult * (1 + bonus.commercial) * prosMult,
+  );
+  return {
+    tax: taxIncome,
+    factory: factoryIncome,
+    commercial: commercialIncome,
+    total: taxIncome + factoryIncome + commercialIncome,
+  };
 });
 
 /** Define o nível de imposto da facção do jogador. */
@@ -1220,13 +1325,17 @@ async function doSetTax(level: TaxLevel) {
   }
 }
 
-/** Produção efetiva da cidade selecionada (produção da província + fábricas). */
+/** Produção efetiva da cidade selecionada (base + população + fábricas). */
 const selectedCityEffProd = computed(() => {
-  const base = selected.value?.production ?? 0;
+  const city = selectedCity.value;
+  if (!city) return 0;
   const factories = selectedCityConstructions.value.filter(
     (c) => c.kind === "FABRICA",
   ).length;
-  return base + factories * FACTORY_BY_ALIGNMENT[playerAlignment.value].productivity;
+  return (
+    cityProduction(city) +
+    factories * FACTORY_BY_ALIGNMENT[playerAlignment.value].productivity
+  );
 });
 
 /** Turnos restantes para concluir uma ordem da fila de construção. */
@@ -2265,29 +2374,6 @@ function provinceFill(p: Province): string {
             </div>
           </div>
 
-          <div class="prod-head">Produção por turno</div>
-          <div class="prod-grid">
-            <div
-              v-for="s in TERRITORY_STATS"
-              :key="s.key"
-              class="prod-cell"
-            >
-              <span class="prod-icon">
-                {{
-                  s.key === "resourceProduction" && selectedResource
-                    ? selectedResource.icon
-                    : s.icon
-                }}
-              </span>
-              <span class="prod-info">
-                <span class="prod-val" :style="{ color: s.color }">
-                  +{{ selected[s.key] }}
-                </span>
-                <span class="prod-label">{{ s.label }}</span>
-              </span>
-            </div>
-          </div>
-
           <!-- Esquadrões neste território -->
           <div class="squad-head">
             <span>Esquadrões aqui</span>
@@ -2519,14 +2605,20 @@ function provinceFill(p: Province): string {
             v-if="canSpecializeHere"
             class="squad-city"
             :disabled="busySquad"
-            title="Escolher o setor e as construções do tile"
+            :title="
+              selectedIsPlayerCity
+                ? 'Construções do centro urbano'
+                : 'Escolher o setor e as construções do tile'
+            "
             @click="openSpec"
           >
             🏗️
             {{
-              selectedSector
-                ? "Setor: " + SECTORS[selectedSector].label
-                : "Escolher especialização"
+              selectedIsPlayerCity
+                ? "Construções da cidade"
+                : selectedSector
+                  ? "Setor: " + SECTORS[selectedSector].label
+                  : "Escolher especialização"
             }}
           </button>
 
@@ -2707,6 +2799,26 @@ function provinceFill(p: Province): string {
                   </span>
                   <span class="ci-stat-label">Energia (gera/usa)</span>
                 </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🏭</span>
+                  <span class="ci-stat-val">{{ selectedCityEffProd }}</span>
+                  <span class="ci-stat-label">Produção / turno</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🎭</span>
+                  <span class="ci-stat-val">+{{ selectedCityCulture }}</span>
+                  <span class="ci-stat-label">Cultura / turno</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">🔬</span>
+                  <span class="ci-stat-val">+{{ selectedCityResearch }}</span>
+                  <span class="ci-stat-label">Pesquisa / turno</span>
+                </div>
+                <div class="ci-stat">
+                  <span class="ci-stat-icon">😊</span>
+                  <span class="ci-stat-val">{{ selectedCityHappiness }}%</span>
+                  <span class="ci-stat-label">Felicidade</span>
+                </div>
               </div>
               <div class="ci-label">Comida por turno</div>
               <div class="ci-food">
@@ -2745,7 +2857,7 @@ function provinceFill(p: Province): string {
             <template v-else-if="cityTab === 'production'">
               <p class="ci-note">
                 A cidade constrói um item por vez com a sua produção
-                (<strong>{{ selected.production }}/turno</strong>). Produzir
+                (<strong>{{ selectedCityEffProd }}/turno</strong>). Produzir
                 tropas adia o colono e vice-versa.
               </p>
 
@@ -3048,15 +3160,15 @@ function provinceFill(p: Province): string {
             <button class="x" @click="specPanelOpen = false">✕</button>
           </div>
           <div class="city-body">
-            <!-- Sem setor: escolher -->
-            <template v-if="!selectedSector">
+            <!-- Tile de setor ainda sem setor: escolher um -->
+            <template v-if="!selectedIsPlayerCity && !selectedSector">
               <p class="ci-note">
                 Especialize este tile num setor para erguer construções — a
                 produção vai para a cidade que cobre o tile.
               </p>
               <div class="sector-grid">
                 <button
-                  v-for="s in SECTOR_LIST"
+                  v-for="s in availableSectors"
                   :key="s.id"
                   class="sector-btn"
                   :disabled="busySquad"
@@ -3068,26 +3180,33 @@ function provinceFill(p: Province): string {
               </div>
             </template>
 
-            <!-- Com setor: construções -->
+            <!-- Centro urbano (tile da cidade) ou tile com setor: construções -->
             <template v-else>
               <div class="ci-label">
-                <span>
+                <span v-if="selectedIsPlayerCity">🏙️ Centro urbano</span>
+                <span v-else-if="selectedSector">
                   {{ SECTORS[selectedSector].icon }} Setor
                   {{ SECTORS[selectedSector].label }}
                 </span>
                 <button
                   v-if="
+                    !selectedIsPlayerCity &&
+                    selectedSector &&
                     constructionsHere.length === 0 &&
                     constructionOrdersHere.length === 0
                   "
                   class="mini-btn"
                   :disabled="busySquad"
                   title="Limpar o setor para escolher outro"
-                  @click="doAssignSector(selectedSector)"
+                  @click="doAssignSector(null)"
                 >
                   trocar
                 </button>
               </div>
+              <p v-if="selectedIsPlayerCity" class="ci-note">
+                Construções erguidas direto no centro da cidade, sem precisar
+                de um tile de setor.
+              </p>
 
               <div v-if="constructionsHere.length > 0" class="cons-built">
                 <span
@@ -3103,11 +3222,11 @@ function provinceFill(p: Province): string {
                 </span>
               </div>
 
-              <p v-if="sectorConstructions.length === 0" class="squad-empty">
+              <p v-if="panelConstructions.length === 0" class="squad-empty">
                 As construções deste setor chegam em breve.
               </p>
               <div
-                v-for="c in sectorConstructions"
+                v-for="c in panelConstructions"
                 :key="c.kind"
                 class="cons-item"
               >
@@ -3272,6 +3391,13 @@ function provinceFill(p: Province): string {
                   <span class="ci-stat-label">Felicidade</span>
                 </div>
                 <div class="ci-stat">
+                  <span class="ci-stat-icon">📈</span>
+                  <span class="ci-stat-val">
+                    {{ playerProsperity }}/{{ playerProsperityCap }}
+                  </span>
+                  <span class="ci-stat-label">Prosperidade (teto)</span>
+                </div>
+                <div class="ci-stat">
                   <span class="ci-stat-icon">💰</span>
                   <span class="ci-stat-val">
                     +{{ fmt(incomeSummary.total) }}
@@ -3287,6 +3413,10 @@ function provinceFill(p: Province): string {
                   <span class="up">+{{ fmt(incomeSummary.tax) }}</span>
                 </div>
                 <div class="econ-line">
+                  <span>🏬 Zonas comerciais</span>
+                  <span class="up">+{{ fmt(incomeSummary.commercial) }}</span>
+                </div>
+                <div class="econ-line">
                   <span>🏭 Zonas de fábrica</span>
                   <span class="up">+{{ fmt(incomeSummary.factory) }}</span>
                 </div>
@@ -3296,8 +3426,9 @@ function provinceFill(p: Province): string {
                 </div>
               </div>
               <p class="note">
-                A felicidade ainda não afeta o jogo — vai influenciar o
-                crescimento da população mais adiante.
+                A prosperidade multiplica a renda de impostos e zonas
+                comerciais — cresce devagar a cada turno. A felicidade ainda
+                não afeta o crescimento da população (em breve).
               </p>
             </div>
           </div>

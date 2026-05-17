@@ -4,6 +4,7 @@ import {
   GeneratedProvince,
   CapitalSeed,
   continentCells,
+  MAP_SCALE,
 } from './map-generator';
 import { NATIONS, NATION_CODES, Nation, CUSTOM_NATION_CODE } from './nations';
 import { AlignmentId } from './alignments';
@@ -15,6 +16,15 @@ import {
   cityTaxIncome,
   clampTax,
   areaBonus,
+  happinessFor,
+  cityHappiness,
+  initialProsperity,
+  prosperityCap,
+  prosperityGrowthMult,
+  prosperityIncomeMultiplier,
+  PROSPERITY_BASE_GROWTH,
+  PROSPERITY_MIN,
+  PROSPERITY_DECAY,
   FACTORY_BY_ALIGNMENT,
   ALIGNMENT_ECONOMY,
   type TaxLevel,
@@ -29,6 +39,7 @@ import {
   MORAL_REGEN,
   MORAL_REGEN_OWN_TILE,
   TROOP_TYPES,
+  BARRACKS_TROOP_XP,
   type RecruitOrder,
   type TroopKind,
 } from './squads';
@@ -38,14 +49,19 @@ import {
   cityFoodCapacity,
   cityManpower,
   cityPopCap,
+  cityProduction,
+  cityBaseCulture,
+  cityResourceYield,
   loadCities,
   loadCityResources,
   CAPITAL_START_FOOD,
   CAPITAL_START_POP,
   DISCONNECT_FOOD_PENALTY,
   STARVATION_LOSS,
+  INDEPENDENT_CITY_RESEARCH,
   type City,
 } from './cities';
+import { resourceInfo } from './resources';
 import {
   loadConstructions,
   loadConstructionOrders,
@@ -119,6 +135,7 @@ interface FactionRow {
   research_points: number;
   culture: number;
   tax_level: string;
+  prosperity: number;
 }
 
 interface SaveRow {
@@ -219,7 +236,8 @@ export async function ensureSchema(): Promise<void> {
       manpower        INTEGER NOT NULL,
       research_points INTEGER NOT NULL,
       culture         INTEGER NOT NULL DEFAULT 0,
-      tax_level       TEXT    NOT NULL DEFAULT 'MEDIO'
+      tax_level       TEXT    NOT NULL DEFAULT 'MEDIO',
+      prosperity      REAL    NOT NULL DEFAULT 40
     )
   `);
   // Migração: a coluna de cultura (facções anteriores a esse valor).
@@ -235,6 +253,12 @@ export async function ensureSchema(): Promise<void> {
   if (!factionCols.some((c) => c.name === 'tax_level')) {
     await db.execute(
       "ALTER TABLE factions ADD COLUMN tax_level TEXT NOT NULL DEFAULT 'MEDIO'",
+    );
+  }
+  // Migração: a coluna de prosperidade.
+  if (!factionCols.some((c) => c.name === 'prosperity')) {
+    await db.execute(
+      'ALTER TABLE factions ADD COLUMN prosperity REAL NOT NULL DEFAULT 40',
     );
   }
 
@@ -546,6 +570,7 @@ function rowToFaction(r: FactionRow): FactionState {
     researchPoints: r.research_points,
     culture: r.culture,
     taxLevel: (r.tax_level as TaxLevel) ?? 'MEDIO',
+    prosperity: r.prosperity ?? 40,
   };
 }
 
@@ -607,16 +632,27 @@ async function insertProvinces(
   }
 }
 
-/** Cria as facções de uma partida, todas com os valores iniciais padrão. */
-async function insertFactions(saveId: number, codes: string[]): Promise<void> {
+/**
+ * Cria as facções de uma partida com os valores iniciais. A **prosperidade**
+ * inicial depende do direcionamento político de cada nação.
+ */
+async function insertFactions(
+  saveId: number,
+  codes: string[],
+  customAlignment: AlignmentId | null,
+): Promise<void> {
   const db = await getDb();
   const s = STARTING_FACTION;
   for (const code of codes) {
+    const alignment: AlignmentId =
+      code === CUSTOM_NATION_CODE
+        ? customAlignment ?? 'INDEPENDENTE'
+        : NATIONS.find((n) => n.code === code)?.alignment ?? 'INDEPENDENTE';
     await db.execute(
       `INSERT INTO factions
          (save_id, code, money, influence, manpower, research_points, culture,
-          tax_level)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          tax_level, prosperity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         saveId,
         code,
@@ -626,6 +662,7 @@ async function insertFactions(saveId: number, codes: string[]): Promise<void> {
         s.researchPoints,
         s.culture,
         s.taxLevel,
+        initialProsperity(alignment),
       ],
     );
   }
@@ -725,7 +762,16 @@ async function touchSave(saveId: number): Promise<void> {
  * jogador criou a sua própria, uma capital sorteada no continente escolhido.
  */
 function buildSeeds(customContinent: string | null): CapitalSeed[] {
-  const seeds: CapitalSeed[] = [...NATIONS];
+  // As capitais das nações fixas são definidas no desenho-base do mapa; aqui
+  // são escaladas para o tamanho real do mapa (ver `MAP_SCALE`).
+  const seeds: CapitalSeed[] = NATIONS.map((n) => ({
+    code: n.code,
+    continent: n.continent,
+    capital: {
+      col: n.capital.col * MAP_SCALE,
+      row: n.capital.row * MAP_SCALE,
+    },
+  }));
   if (customContinent) {
     const cells = continentCells(customContinent);
     const spot = cells[Math.floor(Math.random() * cells.length)];
@@ -776,7 +822,11 @@ export async function createGame(
   const map = generateMap(buildSeeds(customContinent));
   await insertProvinces(saveId, map.provinces);
   const codes = isCustom ? [...NATION_CODES, CUSTOM_NATION_CODE] : NATION_CODES;
-  await insertFactions(saveId, codes);
+  await insertFactions(
+    saveId,
+    codes,
+    isCustom ? choice.alignment : null,
+  );
   // Cada capital nasce como cidade e semeia o manpower inicial da facção.
   await seedCapitalCities(saveId, map.provinces, true);
   return saveId;
@@ -828,7 +878,13 @@ export async function loadFactions(saveId: number): Promise<FactionState[]> {
   );
   const have = new Set(existing.map((r) => r.code));
   const missing = expected.filter((c) => !have.has(c));
-  if (missing.length > 0) await insertFactions(saveId, missing);
+  if (missing.length > 0) {
+    await insertFactions(
+      saveId,
+      missing,
+      save.customNation?.alignment ?? null,
+    );
+  }
 
   const rows = await db.select<FactionRow[]>(
     'SELECT * FROM factions WHERE save_id = ?',
@@ -934,11 +990,10 @@ export interface TurnResult {
 /**
  * Avança a partida em um turno:
  *
- * - cada facção recebe os **pontos de pesquisa** e a **cultura** produzidos
- *   pelas suas províncias (as capitais produzem o dobro — ver `map-generator`);
  * - cada **cidade** processa o seu ciclo: produz/consome **comida**, cresce ou
- *   encolhe de **população** e concede **manpower** à facção (1% da população,
- *   só quando a população cresce — ver `cities.ts`);
+ *   encolhe de **população**, concede **manpower** à facção (1% da população) e
+ *   rende **cultura**, **pesquisa**, **dinheiro** e **recursos** — províncias
+ *   sem cidade não produzem nada (ver `cities.ts` e `constructions.ts`);
  * - cada facção paga a **manutenção** do seu exército em **dinheiro** —
  *   esquadrões e tropas de inventário; quem está num tile da própria facção
  *   custa **metade** (ver `squadUpkeepAt`);
@@ -958,17 +1013,6 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const save = await getSave(saveId);
   const provinces = await readProvinces(saveId);
   const factions = await loadFactions(saveId);
-
-  // Soma, por facção, a pesquisa e a cultura das suas províncias. O manpower
-  // **não** vem mais das províncias — agora é gerado pelas cidades.
-  const gain = new Map<string, { research: number; culture: number }>();
-  for (const p of provinces) {
-    if (!p.ownerCode) continue;
-    const g = gain.get(p.ownerCode) ?? { research: 0, culture: 0 };
-    g.research += p.researchProduction;
-    g.culture += p.cultureProduction;
-    gain.set(p.ownerCode, g);
-  }
 
   // Mapa de células → província, usado na manutenção, no recrutamento e na
   // recuperação dos esquadrões.
@@ -1057,6 +1101,8 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     foodCapacity: number;
     moneyGain: number;
     cultureGain: number;
+    researchGain: number;
+    happiness: number;
     popCapBonus: number;
     /** Recursos tocados (coletados/consumidos) → quantidade final no estoque. */
     resourceFinal: Map<string, number>;
@@ -1072,17 +1118,28 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       industrial: 0,
     };
     const cons = consByCity.get(k) ?? [];
-    const cityProd = provByTile.get(k)?.production ?? 0;
     const inv = invByCity.get(k) ?? new Map<string, number>();
 
     let factories = 0;
     let granaries = 0;
     let armazens = 0;
     let foodProduction = cityFoodProduction(c);
-    let cultureGain = 0;
+    let cultureGain = cityBaseCulture(c);
+    // Pesquisa: as cidades dos estados independentes a geram passivamente.
+    let researchGain = align === 'INDEPENDENTE' ? INDEPENDENT_CITY_RESEARCH : 0;
+    let happinessBonus = 0;
     let popCapBonus = 0;
     let commercialMoney = 0;
     const collected = new Map<string, number>();
+    // A cidade extrai um pouco do recurso local do seu próprio tile.
+    const cityProv = provByTile.get(k);
+    if (cityProv && cityProv.resource !== ResourceType.TERRAS_AGRICOLAS) {
+      const rare = resourceInfo(cityProv.resource).tier === 'RARO';
+      const yield_ = cityResourceYield(c.isCapital, rare);
+      if (yield_ > 0) {
+        collected.set(cityProv.resource, yield_);
+      }
+    }
     for (const con of cons) {
       const def = CONSTRUCTIONS[con.kind];
       if (con.kind === 'FABRICA') factories++;
@@ -1118,6 +1175,8 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       if (con.kind === 'MUSEU' || con.kind === 'TEATRO') {
         cultureGain += def.culturePerTurn ?? 0;
       }
+      researchGain += def.researchPerTurn ?? 0;
+      happinessBonus += def.happiness ?? 0;
       commercialMoney += constructionMoneyPerTurn(con.kind, align);
     }
 
@@ -1152,19 +1211,27 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       }
     }
 
-    const effProduction = cityProd + factories * factory.productivity;
+    const effProduction =
+      cityProduction(c) + factories * factory.productivity;
     const foodCapacity = cityFoodCapacity(c, granaries);
     const tax = clampTax(
       factionByCode.get(c.ownerCode)?.taxLevel ?? 'MEDIO',
       align,
     );
+    // A prosperidade multiplica a renda de impostos e de zonas comerciais.
+    const prosMult = prosperityIncomeMultiplier(
+      factionByCode.get(c.ownerCode)?.prosperity ?? 40,
+    );
     const moneyGain =
-      cityTaxIncome(c.population, tax, align) +
+      Math.round(cityTaxIncome(c.population, tax, align) * prosMult) +
       Math.round(
         factories * factory.money * econ.industrialMult * (1 + bonus.industrial),
       ) +
       Math.round(
-        commercialMoney * econ.commercialMult * (1 + bonus.commercial),
+        commercialMoney *
+          econ.commercialMult *
+          (1 + bonus.commercial) *
+          prosMult,
       );
 
     cityCalc.set(k, {
@@ -1173,13 +1240,36 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       foodCapacity,
       moneyGain,
       cultureGain,
+      researchGain,
+      happiness: cityHappiness(tax, happinessBonus),
       popCapBonus,
       resourceFinal,
     });
   }
-  /** Produção efetiva de uma cidade (província + zonas de fábrica). */
-  const effProdAt = (k: string): number =>
-    cityCalc.get(k)?.effProduction ?? provByTile.get(k)?.production ?? 0;
+
+  // Felicidade da facção = média da felicidade das suas cidades (sem cidades,
+  // a base do imposto).
+  const factionHappiness = new Map<string, number>();
+  {
+    const sum = new Map<string, number>();
+    const count = new Map<string, number>();
+    for (const c of cities) {
+      const h = cityCalc.get(`${c.x},${c.y}`)?.happiness ?? 0;
+      sum.set(c.ownerCode, (sum.get(c.ownerCode) ?? 0) + h);
+      count.set(c.ownerCode, (count.get(c.ownerCode) ?? 0) + 1);
+    }
+    for (const f of factions) {
+      const n = count.get(f.code) ?? 0;
+      factionHappiness.set(
+        f.code,
+        n > 0
+          ? (sum.get(f.code) ?? 0) / n
+          : happinessFor(clampTax(f.taxLevel, alignOf(f.code))),
+      );
+    }
+  }
+  /** Produção efetiva de uma cidade (base + população + zonas de fábrica). */
+  const effProdAt = (k: string): number => cityCalc.get(k)?.effProduction ?? 0;
 
   // Processa a fila de recrutamento (tropas/colonos) — uma por cidade. Avança
   // a primeira ordem pela produção efetiva da cidade.
@@ -1275,8 +1365,10 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const cityManpowerGain = new Map<string, number>();
   /** Dinheiro que as cidades rendem à facção neste turno. */
   const cityMoneyGain = new Map<string, number>();
-  /** Cultura que as construções urbanas rendem à facção neste turno. */
+  /** Cultura que as cidades rendem à facção neste turno. */
   const cityCultureGain = new Map<string, number>();
+  /** Pesquisa que as cidades rendem à facção neste turno. */
+  const cityResearchGain = new Map<string, number>();
   for (const c of cities) {
     const calc = cityCalc.get(`${c.x},${c.y}`)!;
     cityMoneyGain.set(
@@ -1286,6 +1378,10 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     cityCultureGain.set(
       c.ownerCode,
       (cityCultureGain.get(c.ownerCode) ?? 0) + calc.cultureGain,
+    );
+    cityResearchGain.set(
+      c.ownerCode,
+      (cityResearchGain.get(c.ownerCode) ?? 0) + calc.researchGain,
     );
     const prod = calc.foodProduction;
     let cons = cityFoodConsumption(c.population);
@@ -1354,31 +1450,64 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
   }
 
+  // Prosperidade de cada facção: cresce devagar (mais rápido com imposto baixo
+  // e com construções de prosperidade) e decai se ficar acima do teto.
+  const prosperityNext = new Map<string, number>();
+  for (const f of factions) {
+    const align = alignOf(f.code);
+    const tax = clampTax(f.taxLevel, align);
+    const cap = prosperityCap(
+      align,
+      factionHappiness.get(f.code) ?? happinessFor(tax),
+    );
+    let consBonus = 0;
+    for (const con of constructions) {
+      if (con.ownerCode === f.code) {
+        consBonus += CONSTRUCTIONS[con.kind].prosperityGrowth ?? 0;
+      }
+    }
+    let p = f.prosperity;
+    if (p > cap) {
+      p = Math.max(cap, p - PROSPERITY_DECAY);
+    } else {
+      const growth =
+        PROSPERITY_BASE_GROWTH * prosperityGrowthMult(tax) * (1 + consBonus);
+      p = Math.min(cap, Math.max(PROSPERITY_MIN, p + growth));
+    }
+    prosperityNext.set(f.code, p);
+  }
+
   const turn = save.turn + 1;
   await db.execute('BEGIN');
   try {
     for (const f of factions) {
-      const g = gain.get(f.code);
       const up = upkeep.get(f.code) ?? 0;
       const mpGain = cityManpowerGain.get(f.code) ?? 0;
       const income = cityMoneyGain.get(f.code) ?? 0;
       const cultureGain = cityCultureGain.get(f.code) ?? 0;
-      if (!g && !up && !mpGain && !income && !cultureGain) continue;
-      if (g) {
-        f.researchPoints += g.research;
-        f.culture += g.culture;
-      }
-      // Cultura das construções urbanas (museu, teatro, rádio, TV).
+      const researchGain = cityResearchGain.get(f.code) ?? 0;
+      // Cultura e pesquisa vêm das cidades (base + construções).
       f.culture += cultureGain;
+      f.researchPoints += researchGain;
       // Manpower vem do crescimento das cidades (1% da nova população).
       f.manpower += mpGain;
       // Renda das cidades (imposto + fábricas) menos a manutenção; o dinheiro
       // não pode ficar negativo.
       f.money = Math.max(0, f.money + income - up);
+      f.prosperity = prosperityNext.get(f.code) ?? f.prosperity;
       await db.execute(
-        `UPDATE factions SET money = ?, manpower = ?, research_points = ?, culture = ?
+        `UPDATE factions SET money = ?, manpower = ?, research_points = ?,
+           culture = ?, prosperity = ?
          WHERE save_id = ? AND code = ?`,
-        [f.money, f.manpower, f.researchPoints, f.culture, saveId, f.code],
+        [
+          f.money,
+          f.manpower,
+          f.researchPoints,
+          f.culture,
+          f.prosperity,
+          saveId,
+          f.code,
+        ],
       );
     }
     // Aplica o ciclo de turno das cidades (comida, população, manpower-teto).
@@ -1400,10 +1529,15 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
     for (const t of newTroops) {
       const troop = TROOP_TYPES[t.kind];
+      // Tropa formada numa cidade com Quartel nasce já com experiência.
+      const hasBarracks = (consByCity.get(`${t.x},${t.y}`) ?? []).some(
+        (con) => con.kind === 'BARRACKS',
+      );
+      const xp = hasBarracks ? BARRACKS_TROOP_XP : 0;
       await db.execute(
         `INSERT INTO city_troops (save_id, x, y, owner_code, kind, hp, max_hp, xp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-        [saveId, t.x, t.y, t.ownerCode, t.kind, troop.hp, troop.hp],
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [saveId, t.x, t.y, t.ownerCode, t.kind, troop.hp, troop.hp, xp],
       );
     }
     // Colonos concluídos entram num esquadrão de colonos do tile (criando um
