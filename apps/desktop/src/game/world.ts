@@ -1100,6 +1100,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   // ===== Cidades, construções e economia =====
   const cities = await loadCities(saveId);
   const constructions = await loadConstructions(saveId);
+  // Cada construção erguida soma a sua manutenção ao custo da facção.
+  for (const con of constructions) {
+    const cost = CONSTRUCTIONS[con.kind].upkeep;
+    upkeep.set(con.ownerCode, (upkeep.get(con.ownerCode) ?? 0) + cost);
+  }
   const constructionOrders = await loadConstructionOrders(saveId);
   const cityResources = await loadCityResources(saveId);
   const factionByCode = new Map(factions.map((f) => [f.code, f]));

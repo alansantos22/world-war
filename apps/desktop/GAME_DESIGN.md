@@ -568,10 +568,16 @@ população, manpower, e rende **cultura**, **pesquisa**, **dinheiro** e
 **recursos** à facção (ver seções 12 e 13). Províncias sem cidade não rendem
 nada. O **manpower** vem do crescimento (1% da população nova).
 
-Cada facção também **paga a manutenção** do seu exército em **dinheiro** (ver
-seção 11): 25 por esquadrão + 10 por tropa, e ainda as tropas do inventário —
-mas tudo que está **num tile da própria facção custa metade**. O dinheiro
-nunca fica negativo: se o caixa não cobre a manutenção, ele só chega a 0.
+Cada facção também **paga a manutenção** em **dinheiro** de duas fontes:
+
+- o **exército** (ver seção 11): 25 por esquadrão + 10 por tropa, e ainda as
+  tropas do inventário — mas tudo que está **num tile da própria facção custa
+  metade**;
+- as **construções erguidas** (ver seção 13): cada construção pronta cobra uma
+  **manutenção fixa por turno**, somada ao custo da facção.
+
+O dinheiro nunca fica negativo: se o caixa não cobre a manutenção, ele só
+chega a 0.
 
 Cada cidade tem **duas filas** que avançam em paralelo, cada uma pela
 **produção efetiva** da cidade (produção da província + zonas de fábrica):
@@ -1060,6 +1066,22 @@ efetiva da cidade. O **dinheiro** é cobrado ao enfileirar; a **produção** é
 gasta turno a turno. Cada construção tem um **limite por tile** (algumas, um
 **limite por facção**); algumas são **proibidas** por direcionamento ou
 **exigem** outra construção.
+
+Além do custo de erguer, **toda construção pronta cobra uma manutenção fixa
+em dinheiro por turno** da facção (descontada junto da manutenção do exército
+— ver seção 9). Nas listas abaixo o par entre parênteses é
+`(produção/dinheiro)` do custo de erguer; a manutenção por turno de cada
+construção está nesta tabela:
+
+| Setor | Construção · 🔧manutenção |
+|-------|---------------------------|
+| Agrícola   | Fazenda 40 · Celeiro 20 · Pasto 50 |
+| Industrial | Mina 80 · Zona de fábricas 120 · Armazém 40 · Madeireira 50 · Oleoduto 130 · Usina a carvão 150 · Usina nuclear 500 · Usina de petróleo 260 |
+| Urbano     | Conjunto habitacional 100 · Área urbana 80 · Museu 55 · Teatro 45 · Centro policial 60 · Agência de propaganda 90 · Rádio 40 · TV 70 |
+| Comercial  | Mercado local 80 · Shopping 130 · Zona comercial 190 · Banco Nacional 300 · Bolsa de valores 420 · Agência bancária 100 · Mercado exterior 80 · Mercado militar 60 |
+| Religioso  | Templo 35 · Catedral 120 · Monumento 100 |
+| Militar    | Quartel 80 · Academia 110 · Fábrica de armamento 160 · Fábrica de armaduras 190 · Fortificação 260 · Muralhas 360 · Silo de mísseis 250 |
+| Pesquisa   | Escola 25 · Biblioteca 35 · Observatório 55 · Universidade 100 · Laboratório militar 150 · Centro de pesquisas 180 |
 
 **Agrícola** — Fazenda (450/2.500, 1/tile, +5 de comida; ×3 e bônus de clima
 em Terras Agrícolas); Celeiro (350/1.000, 2/tile, +20% na capacidade de

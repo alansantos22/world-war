@@ -1552,11 +1552,17 @@ const incomeSummary = computed(() => {
   const commercialIncome = Math.round(
     commercial * econ.commercialMult * (1 + bonus.commercial) * prosMult,
   );
+  // Manutenção das construções erguidas — despesa fixa por turno.
+  const constructionUpkeep = playerCons.reduce(
+    (s, c) => s + CONSTRUCTIONS[c.kind].upkeep,
+    0,
+  );
   return {
     tax: taxIncome,
     factory: factoryIncome,
     commercial: commercialIncome,
     total: taxIncome + factoryIncome + commercialIncome,
+    constructionUpkeep,
   };
 });
 
@@ -3696,6 +3702,9 @@ function provinceFill(p: Province): string {
                     <span title="Custo de dinheiro">
                       💰 {{ costOf(c.kind).moneyCost }}
                     </span>
+                    <span title="Manutenção por turno">
+                      🔧 {{ c.upkeep }}/turno
+                    </span>
                     <span v-if="c.energyCost" title="Energia consumida">
                       ⚡ {{ c.energyCost }}
                     </span>
@@ -3877,14 +3886,22 @@ function provinceFill(p: Province): string {
                   <span class="up">+{{ fmt(incomeSummary.factory) }}</span>
                 </div>
                 <div class="econ-line total">
-                  <span>Total</span>
+                  <span>Renda total</span>
                   <span class="up">+{{ fmt(incomeSummary.total) }}</span>
+                </div>
+                <div class="econ-line">
+                  <span>🔧 Manutenção das construções</span>
+                  <span class="down">
+                    −{{ fmt(incomeSummary.constructionUpkeep) }}
+                  </span>
                 </div>
               </div>
               <p class="note">
                 A prosperidade multiplica a renda de impostos e zonas
-                comerciais — cresce devagar a cada turno. A felicidade ainda
-                não afeta o crescimento da população (em breve).
+                comerciais — cresce devagar a cada turno. Cada construção
+                erguida cobra manutenção fixa por turno; a manutenção do
+                exército é descontada à parte. A felicidade ainda não afeta o
+                crescimento da população (em breve).
               </p>
             </div>
           </div>
