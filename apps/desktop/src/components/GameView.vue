@@ -66,6 +66,8 @@ import {
   loadCities,
   loadSettlerSquads,
   loadCityResources,
+  renameCity,
+  cityLabel,
   foundCity,
   moveSettlerSquad,
   deleteSettlerSquad,
@@ -135,6 +137,15 @@ import {
   type TaxLevel,
 } from "../game/economy";
 import {
+  findRoadPath,
+  roadTileCost,
+  loadRoadOrders,
+  queueRoad,
+  cancelRoad,
+  type RoadOrder,
+  type RoadKind,
+} from "../game/roads";
+import {
   battleModifiers,
   moralForceDelta,
   defenderTroopCount,
@@ -187,6 +198,8 @@ const settlerMoveMode = ref<SettlerSquad | null>(null);
 const constructions = ref<Construction[]>([]);
 /** Ordens na fila de construção das cidades. */
 const constructionOrders = ref<ConstructionOrder[]>([]);
+/** Ordens na fila de estradas/ferrovias das cidades. */
+const roadOrders = ref<RoadOrder[]>([]);
 /** Inventário de recursos das cidades. */
 const cityResources = ref<CityResource[]>([]);
 /** `true` enquanto o painel de especialização do tile está aberto. */
@@ -198,7 +211,7 @@ const cityTroops = ref<CityTroop[]>([]);
 /** `true` enquanto o painel "Ver cidade" (direita) está aberto. */
 const cityPanelOpen = ref(false);
 /** Aba ativa do painel da cidade. */
-const cityTab = ref<"city" | "production" | "inventory">("city");
+const cityTab = ref<"city" | "production" | "inventory" | "roads">("city");
 /** Ids das tropas do inventário marcadas para mover. */
 const pickedCityTroops = ref<number[]>([]);
 /** Tropas aguardando a escolha de esquadrão ("Qual esquadrão?"). */
@@ -436,6 +449,7 @@ async function load() {
     settlerSquads.value = await loadSettlerSquads(props.saveId);
     constructions.value = await loadConstructions(props.saveId);
     constructionOrders.value = await loadConstructionOrders(props.saveId);
+    roadOrders.value = await loadRoadOrders(props.saveId);
     cityResources.value = await loadCityResources(props.saveId);
     battleLogs.value = await loadBattleLogs(props.saveId);
   } catch (e) {
@@ -454,6 +468,7 @@ async function reloadState() {
   cities.value = await loadCities(props.saveId);
   constructions.value = await loadConstructions(props.saveId);
   constructionOrders.value = await loadConstructionOrders(props.saveId);
+  roadOrders.value = await loadRoadOrders(props.saveId);
   cityResources.value = await loadCityResources(props.saveId);
   factions.value = await loadFactions(props.saveId);
 }
@@ -488,6 +503,8 @@ async function nextTurn() {
     const res = await advanceTurn(props.saveId);
     turn.value = res.turn;
     await reloadState();
+    // Estradas concluídas no turno alteram `provinces.road`.
+    provinces.value = await loadMap(props.saveId);
     factions.value = res.factions;
     flashToast(`Turno ${res.turn} — ${formatTurnDate(res.turn)}`);
   } catch (e) {
@@ -602,17 +619,27 @@ function startMove(s: Squad) {
 async function doMove(s: Squad, dest: Province) {
   busySquad.value = true;
   err.value = "";
+  let stillMoving: Squad | null = null;
   try {
     await moveSquad(s.id, dest.x, dest.y, turn.value);
     squads.value = await loadSquads(props.saveId);
     // Um esquadrão militar destrói esquadrões de colonos inimigos no destino.
     settlerSquads.value = await loadSettlerSquads(props.saveId);
     selected.value = dest;
+    // Movimento múltiplo: andar por estrada/ferrovia rende movimentos extras
+    // no mesmo turno — segue em modo de movimento enquanto ainda puder andar.
+    const updated = squads.value.find((q) => q.id === s.id);
+    if (
+      updated &&
+      canSquadMove(updated, turn.value, isSquadOnGlacial(updated))
+    ) {
+      stillMoving = updated;
+    }
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
     busySquad.value = false;
-    moveMode.value = null;
+    moveMode.value = stillMoving;
   }
 }
 
@@ -962,6 +989,159 @@ const constructionOrdersHere = computed<ConstructionOrder[]>(() =>
     : [],
 );
 
+/** Ordens na fila de estradas/ferrovias da cidade selecionada. */
+const roadOrdersHere = computed<RoadOrder[]>(() =>
+  selectedCity.value
+    ? roadOrders.value.filter(
+        (o) =>
+          o.cityX === selectedCity.value!.x &&
+          o.cityY === selectedCity.value!.y,
+      )
+    : [],
+);
+
+/** Conjunto `"x,y"` dos tiles possuídos pela facção do jogador. */
+const playerOwnedTiles = computed<Set<string>>(() => {
+  const code = game.value?.playerCode;
+  const set = new Set<string>();
+  for (const p of provinces.value) {
+    if (p.ownerCode === code) set.add(`${p.x},${p.y}`);
+  }
+  return set;
+});
+
+/** Tipo de via (`ROAD`/`RAIL`) de cada tile que tem via. */
+const roadByTile = computed<Map<string, RoadKind>>(() => {
+  const m = new Map<string, RoadKind>();
+  for (const p of provinces.value) {
+    if (p.road) m.set(`${p.x},${p.y}`, p.road as RoadKind);
+  }
+  return m;
+});
+
+/** Segmentos de linha das vias — ligam cada tile de via aos seus vizinhos. */
+const roadSegments = computed<
+  { x1: number; y1: number; x2: number; y2: number; rail: boolean }[]
+>(() => {
+  const roads = roadByTile.value;
+  const cityKeys = new Set(cities.value.map((c) => `${c.x},${c.y}`));
+  const seen = new Set<string>();
+  const dirs: [number, number][] = [
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [-1, 0],
+    [1, 0],
+    [-1, 1],
+    [0, 1],
+    [1, 1],
+  ];
+  const segs: { x1: number; y1: number; x2: number; y2: number; rail: boolean }[] =
+    [];
+  for (const p of provinces.value) {
+    if (!p.road) continue;
+    const k = `${p.x},${p.y}`;
+    for (const [dx, dy] of dirs) {
+      const nx = p.x + dx;
+      const ny = p.y + dy;
+      const nk = `${nx},${ny}`;
+      const neighborRoad = roads.has(nk);
+      if (!neighborRoad && !cityKeys.has(nk)) continue;
+      // Ligações via↔via aparecem dos dois lados — desenhe uma só vez.
+      if (neighborRoad) {
+        const segKey = k < nk ? `${k}|${nk}` : `${nk}|${k}`;
+        if (seen.has(segKey)) continue;
+        seen.add(segKey);
+      }
+      const rail = p.road === "RAIL" || roads.get(nk) === "RAIL";
+      segs.push({
+        x1: p.x + 0.5,
+        y1: p.y + 0.5,
+        x2: nx + 0.5,
+        y2: ny + 0.5,
+        rail,
+      });
+    }
+  }
+  return segs;
+});
+
+/** Uma cidade de destino possível para uma estrada, com os custos calculados. */
+interface RoadTarget {
+  city: City;
+  /** Tiles que receberão estrada (`null` = sem caminho por tiles seus). */
+  roadPath: { x: number; y: number }[] | null;
+  roadCost: { prod: number; money: number };
+  /** Tiles que receberão ferrovia (`null` = ainda não ligada por estrada). */
+  railPath: { x: number; y: number }[] | null;
+  railCost: { prod: number; money: number };
+  /** `true` se já há uma via ligando as duas cidades. */
+  connectedByRoad: boolean;
+}
+
+/** Cidades do jogador que a cidade selecionada pode ligar por via. */
+const roadTargets = computed<RoadTarget[]>(() => {
+  const from = selectedCity.value;
+  const code = game.value?.playerCode;
+  if (!from || !code) return [];
+  const owned = playerOwnedTiles.value;
+  const roads = roadByTile.value;
+  const out: RoadTarget[] = [];
+  for (const c of cities.value) {
+    if (c.ownerCode !== code || (c.x === from.x && c.y === from.y)) continue;
+    const start = { x: from.x, y: from.y };
+    const goal = { x: c.x, y: c.y };
+
+    // Estrada: caminho mais curto por tiles próprios; cobra só os tiles
+    // que ainda não têm via.
+    const full = findRoadPath(start, goal, owned);
+    const inter = full ? full.slice(1, -1) : null;
+    const roadPath = inter
+      ? inter.filter((t) => !roads.has(`${t.x},${t.y}`))
+      : null;
+    const rt = roadTileCost('ROAD');
+    const roadN = roadPath ? roadPath.length : 0;
+
+    // Ferrovia: só vale como upgrade de uma via já existente. A* sobre os
+    // tiles de via (+ as cidades) acha o traçado da ligação atual.
+    const viaSet = new Set(roadByTile.value.keys());
+    viaSet.add(`${from.x},${from.y}`);
+    viaSet.add(`${c.x},${c.y}`);
+    const viaPath = findRoadPath(start, goal, viaSet);
+    const viaInter = viaPath ? viaPath.slice(1, -1) : null;
+    const railPath = viaInter
+      ? viaInter.filter((t) => roads.get(`${t.x},${t.y}`) !== 'RAIL')
+      : null;
+    const railT = roadTileCost('RAIL');
+    const railN = railPath ? railPath.length : 0;
+
+    out.push({
+      city: c,
+      roadPath,
+      roadCost: { prod: rt.prod * roadN, money: rt.money * roadN },
+      railPath,
+      railCost: { prod: railT.prod * railN, money: railT.money * railN },
+      connectedByRoad: !!viaPath,
+    });
+  }
+  return out.sort((a, b) =>
+    cityName(a.city).localeCompare(cityName(b.city)),
+  );
+});
+
+/** Nome de exibição de uma cidade (nome dado ou o da província). */
+function cityName(city: City): string {
+  const prov = provinceByTile.value.get(`${city.x},${city.y}`);
+  return cityLabel(city, prov?.name ?? `${city.x},${city.y}`);
+}
+
+/** Turnos restantes para concluir uma ordem de estrada na cidade. */
+function roadEta(o: RoadOrder): number {
+  const prod = selectedCityEffProd.value;
+  if (prod <= 0) return Infinity;
+  return Math.ceil((o.prodCost - o.prodDone) / prod);
+}
+
 /** Setores que o jogador pode escolher (alguns são vetados ao direcionamento). */
 const availableSectors = computed(() =>
   SECTOR_LIST.filter((s) => !isSectorForbidden(s.id, playerAlignment.value)),
@@ -1213,6 +1393,55 @@ async function doCancelConstruction(orderId: number) {
   try {
     await cancelConstruction(orderId);
     constructionOrders.value = await loadConstructionOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Enfileira a construção de uma estrada/ferrovia até a cidade `target`. */
+async function doQueueRoad(target: RoadTarget, kind: RoadKind) {
+  const from = selectedCity.value;
+  const code = game.value?.playerCode;
+  if (!from || !code) return;
+  const path = kind === "RAIL" ? target.railPath : target.roadPath;
+  if (!path || path.length === 0) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await queueRoad(
+      props.saveId,
+      code,
+      from.x,
+      from.y,
+      target.city.x,
+      target.city.y,
+      kind,
+      path,
+    );
+    roadOrders.value = await loadRoadOrders(props.saveId);
+    factions.value = await loadFactions(props.saveId);
+    flashToast(
+      kind === "RAIL"
+        ? `Ferrovia para ${cityName(target.city)} enfileirada.`
+        : `Estrada para ${cityName(target.city)} enfileirada.`,
+    );
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
+/** Cancela uma ordem da fila de estradas e devolve o dinheiro pago. */
+async function doCancelRoad(orderId: number) {
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await cancelRoad(orderId);
+    roadOrders.value = await loadRoadOrders(props.saveId);
     factions.value = await loadFactions(props.saveId);
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
@@ -1619,6 +1848,22 @@ function levelLabel(xp: number): string {
     : `Nv. ${p.level} (máx.)`;
 }
 
+/** Renomeia a cidade selecionada a partir do input do painel da cidade. */
+async function doRenameCity(ev: Event) {
+  const city = selectedCity.value;
+  if (!city) return;
+  busySquad.value = true;
+  err.value = "";
+  try {
+    await renameCity(city.id, (ev.target as HTMLInputElement).value);
+    cities.value = await loadCities(props.saveId);
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busySquad.value = false;
+  }
+}
+
 /** Renomeia um esquadrão a partir do input do modal do exército. */
 async function doRenameSquad(squadId: number, ev: Event) {
   const name = (ev.target as HTMLInputElement).value;
@@ -1985,6 +2230,19 @@ function provinceFill(p: Province): string {
       >
         {{ p.sector ? SECTORS[p.sector].icon : "" }}
       </text>
+      <!-- Estradas e ferrovias -->
+      <line
+        v-for="(s, i) in roadSegments"
+        :key="'road' + i"
+        :x1="s.x1"
+        :y1="s.y1"
+        :x2="s.x2"
+        :y2="s.y2"
+        :stroke="s.rail ? '#9aa8b4' : '#8a5a2b'"
+        :stroke-width="s.rail ? 0.2 : 0.14"
+        stroke-linecap="round"
+        style="pointer-events: none"
+      />
       <!-- Destinos válidos do esquadrão em movimento -->
       <rect
         v-for="p in moveTargets"
@@ -2733,7 +2991,17 @@ function provinceFill(p: Province): string {
           class="card city-panel"
         >
           <div class="card-head">
-            <div class="head-title">🏛️ {{ selected.name }}</div>
+            <div class="head-title city-name">
+              <span>🏛️</span>
+              <input
+                v-if="selectedCity"
+                class="city-name-input"
+                :value="cityLabel(selectedCity, selected.name)"
+                title="Renomear a cidade"
+                maxlength="40"
+                @change="doRenameCity"
+              />
+            </div>
             <button class="x" @click="cityPanelOpen = false">✕</button>
           </div>
           <div class="city-tabs">
@@ -2754,6 +3022,12 @@ function provinceFill(p: Province): string {
               @click="cityTab = 'inventory'"
             >
               Inventário
+            </button>
+            <button
+              :class="{ on: cityTab === 'roads' }"
+              @click="cityTab = 'roads'"
+            >
+              Estradas
             </button>
           </div>
           <div class="city-body">
@@ -3076,7 +3350,7 @@ function provinceFill(p: Province): string {
             </template>
 
             <!-- ===== Aba: inventário ===== -->
-            <template v-else>
+            <template v-else-if="cityTab === 'inventory'">
               <div class="ci-label">
                 <span>Tropas no inventário</span>
                 <span class="squad-count">{{ cityTroopsHere.length }}</span>
@@ -3144,6 +3418,142 @@ function provinceFill(p: Province): string {
                 É preciso um esquadrão estacionado na cidade para receber
                 tropas.
               </p>
+            </template>
+
+            <!-- ===== Aba: estradas ===== -->
+            <template v-else>
+              <p class="ci-note">
+                Ligue esta cidade a outras cidades suas. As vias passam só
+                por tiles seus e aceleram o movimento das tropas — estrada
+                2 tiles/turno, ferrovia 3. A ferrovia é um upgrade da
+                estrada e dá um boost maior de prosperidade.
+              </p>
+
+              <div class="ci-label">
+                <span>Cidades para ligar</span>
+                <span class="squad-count">{{ roadTargets.length }}</span>
+              </div>
+              <p v-if="roadTargets.length === 0" class="squad-empty">
+                Nenhuma outra cidade sua — funde colonos para crescer.
+              </p>
+              <div
+                v-for="t in roadTargets"
+                :key="`${t.city.x},${t.city.y}`"
+                class="road-target"
+              >
+                <div class="road-target-name">🏙️ {{ cityName(t.city) }}</div>
+                <p v-if="t.roadPath === null" class="road-none">
+                  Sem conexão — não há caminho por tiles seus.
+                </p>
+                <template v-else>
+                  <!-- Estrada -->
+                  <div v-if="t.roadPath.length > 0" class="road-opt">
+                    <span class="road-opt-info">
+                      🛣️ Estrada · {{ t.roadPath.length }} tiles ·
+                      {{ fmt(t.roadCost.prod) }} prod /
+                      {{ fmt(t.roadCost.money) }} 💰
+                    </span>
+                    <button
+                      class="mini-btn"
+                      :disabled="
+                        busySquad ||
+                        (playerFaction?.money ?? 0) < t.roadCost.money
+                      "
+                      @click="doQueueRoad(t, 'ROAD')"
+                    >
+                      Construir
+                    </button>
+                  </div>
+                  <p v-else class="road-done">🛣️ Ligada por estrada.</p>
+
+                  <!-- Ferrovia (upgrade da estrada) -->
+                  <div
+                    v-if="
+                      t.connectedByRoad &&
+                      t.railPath &&
+                      t.railPath.length > 0
+                    "
+                    class="road-opt"
+                  >
+                    <span class="road-opt-info">
+                      🚆 Ferrovia · {{ t.railPath.length }} tiles ·
+                      {{ fmt(t.railCost.prod) }} prod /
+                      {{ fmt(t.railCost.money) }} 💰
+                    </span>
+                    <button
+                      class="mini-btn"
+                      :disabled="
+                        busySquad ||
+                        (playerFaction?.money ?? 0) < t.railCost.money
+                      "
+                      @click="doQueueRoad(t, 'RAIL')"
+                    >
+                      Construir
+                    </button>
+                  </div>
+                  <p
+                    v-else-if="t.connectedByRoad"
+                    class="road-done"
+                  >
+                    🚆 Ligada por ferrovia.
+                  </p>
+                  <p v-else class="road-none">
+                    🚆 Ferrovia exige uma estrada já ligando as cidades.
+                  </p>
+                </template>
+              </div>
+
+              <!-- Fila de estradas -->
+              <div class="rc-block">
+                <div class="rc-label">
+                  <span>Fila de estradas</span>
+                  <span class="squad-count">
+                    {{ roadOrdersHere.length }}
+                  </span>
+                </div>
+                <div
+                  v-for="(o, i) in roadOrdersHere"
+                  :key="o.id"
+                  class="rc-order"
+                >
+                  <span class="rc-order-pos">{{ i + 1 }}</span>
+                  <div class="rc-order-info">
+                    <div class="rc-order-name">
+                      {{ o.kind === "RAIL" ? "🚆 Ferrovia" : "🛣️ Estrada" }}
+                      <span class="dim">
+                        → tile {{ o.targetX }},{{ o.targetY }}
+                      </span>
+                    </div>
+                    <div class="rc-progress">
+                      <div
+                        class="rc-progress-fill"
+                        :style="{
+                          width:
+                            Math.min(100, (o.prodDone / o.prodCost) * 100) +
+                            '%',
+                        }"
+                      ></div>
+                    </div>
+                    <div class="rc-order-meta">
+                      {{ o.prodDone }}/{{ o.prodCost }} produção
+                      <span class="dimsep">·</span>
+                      <span v-if="i === 0">~{{ roadEta(o) }} turno(s)</span>
+                      <span v-else class="dim">aguardando na fila</span>
+                    </div>
+                  </div>
+                  <button
+                    class="sbtn danger rc-cancel"
+                    :disabled="busySquad"
+                    title="Cancelar — devolve o dinheiro pago"
+                    @click="doCancelRoad(o.id)"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p v-if="roadOrdersHere.length === 0" class="squad-empty">
+                  Nenhuma estrada em andamento.
+                </p>
+              </div>
             </template>
           </div>
         </section>
@@ -5159,6 +5569,40 @@ function provinceFill(p: Province): string {
   border-color: #7fb86b;
   color: #9ad187;
 }
+.road-target {
+  padding: 8px 10px;
+  margin-bottom: 7px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+}
+.road-target-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin-bottom: 5px;
+}
+.road-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.road-opt-info {
+  flex: 1;
+  font-size: 0.74rem;
+  color: var(--text-dim, #9aa6b2);
+}
+.road-none,
+.road-done {
+  margin: 4px 0 0;
+  font-size: 0.74rem;
+}
+.road-none {
+  color: #c98b6b;
+}
+.road-done {
+  color: #9ad187;
+}
 .move-troop-banner {
   display: flex;
   align-items: center;
@@ -5601,6 +6045,33 @@ tr.me {
   font-size: 0.74rem;
   font-style: italic;
   color: #7d8694;
+}
+/* Nome editável da cidade no cabeçalho do painel */
+.city-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.city-name-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+}
+.city-name-input:hover:not(:focus) {
+  border-color: var(--line);
+}
+.city-name-input:focus {
+  outline: none;
+  border-color: #e8c14a;
+  background: rgba(0, 0, 0, 0.3);
 }
 /* Inventário de recursos da cidade */
 .ci-resources {

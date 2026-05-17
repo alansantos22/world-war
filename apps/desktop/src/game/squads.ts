@@ -13,6 +13,7 @@
 import { getDb } from '../db';
 import { COLONO_COST, destroySettlerSquadsAt } from './cities';
 import { cityHasConstruction } from './constructions';
+import { roadMoveAllowance } from './roads';
 
 /** Custo, em dinheiro, para montar um esquadrão. */
 export const SQUAD_COST = 500;
@@ -211,10 +212,14 @@ export interface Squad {
   y: number;
   /** Turno em que foi criado (fica pronto no turno seguinte). */
   createdTurn: number;
-  /** Último turno em que se moveu (move-se uma vez por turno). */
+  /** Último turno em que se moveu. */
   lastMovedTurn: number;
   /** Ataques já gastos no turno atual (zera a cada turno). */
   attacksUsed: number;
+  /** Movimentos já gastos no turno atual (zera a cada turno). */
+  movesUsed: number;
+  /** Movimentos permitidos no turno — sobe ao andar por estradas/ferrovias. */
+  moveAllowance: number;
   /** Moral do esquadrão (0–100). Afeta a força em batalha. */
   moral: number;
   /** Nome dado pelo jogador, ou `null` (mostra "Esquadrão #id"). */
@@ -233,6 +238,8 @@ interface SquadRow {
   created_turn: number;
   last_moved_turn: number;
   attacks_used: number;
+  moves_used: number;
+  move_allowance: number;
   moral: number;
   name: string | null;
   cmd_stars: number;
@@ -263,6 +270,8 @@ function rowToSquad(r: SquadRow): Squad {
     createdTurn: r.created_turn,
     lastMovedTurn: r.last_moved_turn,
     attacksUsed: r.attacks_used,
+    movesUsed: r.moves_used ?? 0,
+    moveAllowance: r.move_allowance ?? 1,
     moral: r.moral,
     name: r.name,
     commander: {
@@ -371,9 +380,10 @@ export function isSquadReady(squad: Squad, currentTurn: number): boolean {
 }
 
 /**
- * Um esquadrão pode mover-se uma vez por turno — só depois de pronto e
- * respeitando o custo do terreno: sair de um **tile gelado** leva 2 turnos,
- * os demais terrenos levam 1.
+ * Um esquadrão pode mover-se depois de pronto. Fora de tile gelado, ele move
+ * enquanto tiver movimentos no turno (`movesUsed < moveAllowance`) — andar por
+ * **estradas/ferrovias** eleva o `moveAllowance` (ver `roads.ts`). Sair de um
+ * **tile gelado** leva 2 turnos.
  */
 export function canSquadMove(
   squad: Squad,
@@ -381,8 +391,10 @@ export function canSquadMove(
   onGlacialTile: boolean,
 ): boolean {
   if (!isSquadReady(squad, currentTurn)) return false;
-  const turnCost = onGlacialTile ? 2 : 1;
-  return currentTurn - squad.lastMovedTurn >= turnCost;
+  if (onGlacialTile) {
+    return currentTurn - squad.lastMovedTurn >= 2;
+  }
+  return squad.movesUsed < squad.moveAllowance;
 }
 
 /** Carrega os esquadrões de uma partida, já com as suas tropas. */
@@ -503,8 +515,9 @@ export async function deleteSquad(squadId: number): Promise<void> {
 }
 
 /**
- * Move um esquadrão para um tile, gastando o seu movimento do turno e
- * `MORAL_MOVE_COST` de moral.
+ * Move um esquadrão para um tile, gastando um movimento do turno e
+ * `MORAL_MOVE_COST` de moral. Entrar num tile com **estrada/ferrovia** eleva o
+ * `move_allowance` (2 tiles de estrada, 3 de ferrovia por turno).
  */
 export async function moveSquad(
   squadId: number,
@@ -513,18 +526,28 @@ export async function moveSquad(
   currentTurn: number,
 ): Promise<void> {
   const db = await getDb();
-  await db.execute(
-    `UPDATE squads
-       SET x = ?, y = ?, last_moved_turn = ?, moral = MAX(0, moral - ?)
-     WHERE id = ?`,
-    [x, y, currentTurn, MORAL_MOVE_COST, squadId],
-  );
-  // Civ5: um esquadrão militar que entra num tile destrói os esquadrões de
-  // colonos inimigos que estiverem nele (civis não resistem a tropas).
   const info = await db.select<{ save_id: number; owner_code: string }[]>(
     'SELECT save_id, owner_code FROM squads WHERE id = ?',
     [squadId],
   );
+  // A via do tile de destino define quantos tiles cabem no turno.
+  let allowance = 1;
+  if (info[0]) {
+    const prov = await db.select<{ road: string | null }[]>(
+      'SELECT road FROM provinces WHERE save_id = ? AND x = ? AND y = ?',
+      [info[0].save_id, x, y],
+    );
+    allowance = roadMoveAllowance(prov[0]?.road ?? null);
+  }
+  await db.execute(
+    `UPDATE squads
+       SET x = ?, y = ?, last_moved_turn = ?, moves_used = moves_used + 1,
+           move_allowance = MAX(move_allowance, ?), moral = MAX(0, moral - ?)
+     WHERE id = ?`,
+    [x, y, currentTurn, allowance, MORAL_MOVE_COST, squadId],
+  );
+  // Civ5: um esquadrão militar que entra num tile destrói os esquadrões de
+  // colonos inimigos que estiverem nele (civis não resistem a tropas).
   if (info[0]) {
     await destroySettlerSquadsAt(info[0].save_id, x, y, info[0].owner_code);
   }
@@ -646,19 +669,21 @@ export async function queueRecruit(
   // O colono é pago com a **população** e a **comida** da própria cidade.
   if (kind === 'COLONO') {
     const cityRows = await db.select<
-      { id: number; population: number; food: number }[]
-    >('SELECT id, population, food FROM cities WHERE save_id = ? AND x = ? AND y = ?', [
-      saveId,
-      x,
-      y,
-    ]);
+      { id: number; population: number; food: number; is_capital: number }[]
+    >(
+      'SELECT id, population, food, is_capital FROM cities WHERE save_id = ? AND x = ? AND y = ?',
+      [saveId, x, y],
+    );
     const city = cityRows[0];
     if (!city) throw new Error('Só é possível produzir colonos numa cidade.');
-    if (city.population < COLONO_COST.population) {
+    // A cidade precisa manter um piso de população depois de pagar o colono:
+    // 500 mil numa capital, 100 mil numa cidade comum.
+    const floor = city.is_capital === 1 ? 500_000 : 100_000;
+    if (city.population < COLONO_COST.population + floor) {
       throw new Error(
-        `População insuficiente para um colono (${COLONO_COST.population.toLocaleString(
+        `População insuficiente para um colono — a cidade precisa manter ${floor.toLocaleString(
           'pt-BR',
-        )}).`,
+        )} de população.`,
       );
     }
     if (city.food < COLONO_COST.food) {

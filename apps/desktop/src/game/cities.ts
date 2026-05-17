@@ -76,6 +76,8 @@ export interface City {
   manpowerCap: number;
   /** Turno em que a cidade foi fundada (1 para as capitais iniciais). */
   foundedTurn: number;
+  /** Nome dado pelo jogador, ou `null` (usa o nome da província). */
+  name: string | null;
 }
 
 interface CityRow {
@@ -88,6 +90,7 @@ interface CityRow {
   food: number;
   manpower_cap: number;
   founded_turn: number;
+  name: string | null;
 }
 
 function rowToCity(r: CityRow): City {
@@ -101,7 +104,26 @@ function rowToCity(r: CityRow): City {
     food: r.food,
     manpowerCap: r.manpower_cap,
     foundedTurn: r.founded_turn,
+    name: r.name ?? null,
   };
+}
+
+/** Nome de exibição de uma cidade — o nome dado, ou o da província. */
+export function cityLabel(city: City, fallback: string): string {
+  return city.name && city.name.trim() ? city.name : fallback;
+}
+
+/** Renomeia uma cidade (um nome vazio volta a usar o nome da província). */
+export async function renameCity(
+  cityId: number,
+  name: string,
+): Promise<void> {
+  const db = await getDb();
+  const clean = name.trim().slice(0, 40);
+  await db.execute('UPDATE cities SET name = ? WHERE id = ?', [
+    clean || null,
+    cityId,
+  ]);
 }
 
 /** Limite-base de estoque de comida de uma cidade (sem celeiros). */

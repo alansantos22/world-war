@@ -293,6 +293,7 @@ Cada província pertence a uma partida (`save_id`).
 | `defender_hp`   | INTEGER | Vida somada das tropas que defendem o território neutro. |
 | `conquered`     | INTEGER | 1 se o território foi tomado de outra facção. |
 | `sector`        | TEXT    | Setor em que o tile foi especializado, ou nulo (seção 13). |
+| `road`          | TEXT    | Via no tile: `ROAD`, `RAIL` ou nulo (seção 14). |
 
 ### Tabela `factions`
 
@@ -333,6 +334,8 @@ Uma linha por **esquadrão** no mapa de uma partida (ver seção 11).
 | `cmd_tradition`    | INTEGER | Tradição militar do comandante.                 |
 | `attacks_used`     | INTEGER | Ataques já gastos no turno atual (zera a cada turno). |
 | `moral`            | INTEGER | Moral do esquadrão (0–100).                     |
+| `moves_used`       | INTEGER | Movimentos já gastos no turno (zera a cada turno). |
+| `move_allowance`   | INTEGER | Movimentos do turno — sobe ao andar por via (seção 14). |
 
 ### Tabela `squad_troops`
 
@@ -464,6 +467,23 @@ Uma linha por **recurso no inventário de uma cidade** (ver seção 13).
 | `resource` | TEXT    | Recurso (`ResourceType`) ou produto (`COURO`/`LA`). |
 | `amount`   | INTEGER | Quantidade acumulada.                             |
 
+### Tabela `road_orders`
+
+Uma linha por **estrada/ferrovia na fila** de uma cidade (ver seção 14).
+
+| Coluna       | Tipo    | Descrição                                       |
+|--------------|---------|-------------------------------------------------|
+| `id`         | INTEGER | Chave primária.                                 |
+| `save_id`    | INTEGER | Partida (`saves.id`) a que pertence.            |
+| `city_x`, `city_y` | INTEGER | Tile da cidade que enfileirou a via.      |
+| `owner_code` | TEXT    | Código da facção dona.                          |
+| `kind`       | TEXT    | `ROAD` ou `RAIL`.                               |
+| `target_x`, `target_y` | INTEGER | Tile da cidade de destino da ligação. |
+| `path`       | TEXT    | JSON dos tiles que receberão a via.             |
+| `prod_cost`  | INTEGER | Produção total necessária.                      |
+| `prod_done`  | INTEGER | Produção já investida.                          |
+| `money_cost` | INTEGER | Dinheiro cobrado ao enfileirar (devolvido se cancelar). |
+
 Criar um novo jogo gera o mapa, grava as províncias, cria as facções e semeia
 uma **cidade em cada capital**; carregar uma partida lê tudo do seu `save_id`.
 "Novo mapa" apaga e regenera só o mapa da partida atual (as facções são
@@ -507,10 +527,11 @@ deixando o mapa livre.
   (imposto, felicidade e renda por turno). Só um painel fica aberto por vez; o
   botão acende quando ativo.
 - **Painel da cidade** (direita) — aberto pelo botão **Ver cidade** do painel
-  da província; só abre em **tiles de cidade**. Tem três abas (estilo
-  *Civilization*): **Cidade** (população, comida, manpower, influência),
-  **Produção** (fila de tropas e colonos) e **Inventário** (tropas guardadas)
-  — ver seção 12.
+  da província; só abre em **tiles de cidade**. O nome no topo é **editável**
+  (renomeia a cidade). Tem três abas (estilo *Civilization*): **Cidade**
+  (população, comida, manpower, influência, produção, cultura, pesquisa,
+  felicidade), **Produção** (filas de tropas/colonos e de construção) e
+  **Inventário** (tropas guardadas) — ver seção 12.
 - **Caixa de turno** (canto inferior direito, sempre visível) — mostra o
   **turno atual**, a **data** e a **estação** de cada hemisfério (ver seção
   10), e traz o botão grande **Próximo turno** que avança o tempo (ver seção
@@ -940,10 +961,11 @@ Cada cidade tem **população** e um estoque de **comida**:
   consumo é pago do estoque.
 - **Crescimento:** se a produção supera o consumo, a população cresce **1% por
   ponto de comida em excedente** (produz 15, consome 10 ⇒ +5%/turno), até o
-  teto de população.
+  teto de população. A **felicidade** da cidade amplia ou reduz esse
+  crescimento (ver seção 13).
 - **Fome:** se o estoque acaba e a comida não cobre o consumo, a cidade perde
-  **3% da população por turno** até a produção bastar — ou até a facção
-  resolver o problema.
+  **3% da população por turno** até a produção bastar — a **felicidade** alta
+  freia essa perda, a baixa a acelera (seção 13).
 - **Penalidade de conexão:** uma cidade comum **sem caminho de tiles possuídos**
   até outra cidade da facção paga **+30%** de comida no consumo. As capitais
   nunca pagam essa penalidade.
@@ -972,6 +994,10 @@ Para fundar uma cidade a facção precisa de um **colono**:
   do painel da cidade). Custa **100 mil de população + 10 de comida** daquela
   cidade (cobrados ao enfileirar) e **200 de produção** (construído ao longo de
   vários turnos). Cancelar a ordem devolve a população e a comida.
+- A cidade precisa **manter um piso de população** depois de pagar o colono:
+  **100 mil** numa cidade comum, **500 mil** numa capital — ou seja, é preciso
+  ter ≥ 200 mil (capital ≥ 600 mil) para produzir um colono. (A fome ainda pode
+  levar a população abaixo desse piso; ele só limita a criação de colonos.)
 - A fila é **única por cidade** — produzir tropas adia o colono e vice-versa.
 - Quando pronto, o colono vai para um **esquadrão de colonos** no tile da
   cidade. Vários colonos podem ficar **no mesmo esquadrão**.
@@ -1136,11 +1162,27 @@ reforça comércio e indústria (+15%, ou +30% nos estados independentes); cada
 
 ### Felicidade
 
-Cada **cidade** tem a sua felicidade (0–100): `50` de base, mais o modificador
-do **imposto** (ver `TAX_LEVELS`), mais os pontos das suas **construções** —
+Cada **cidade** tem a sua felicidade (0–100, no máximo 100): `50` de base, mais
+o modificador do **imposto** (ver `TAX_LEVELS`) — que vale para **todas** as
+cidades —, mais os pontos das suas **construções** (efeito de **uma** cidade) —
 Teatro +4, TV +5, Templo/Rádio +3, Museu +2. A felicidade da **facção** é a
-**média** das felicidades das suas cidades, e é ela que define o **teto de
-prosperidade**. Ainda **não afeta** o crescimento da população (gap).
+**média** das felicidades das suas cidades, e define o **teto de prosperidade**.
+
+A felicidade da cidade também **modula o crescimento da população**: 50 é
+neutro; entre 51 e 100 dá um buff de +10% a +70% no crescimento; abaixo de 50
+dá um debuff de −10% a −80%. No **decaimento** (fome) é o inverso — felicidade
+alta freia a perda, felicidade baixa a acelera.
+
+| Felicidade | Modificador de crescimento |
+|------------|----------------------------|
+| 100 | +70% |
+| 86–99 | +36% a +50% |
+| 71–85 | +21% a +35% |
+| 51–70 | +10% a +20% |
+| 50 | 0% |
+| 30–49 | −10% a −20% |
+| 15–29 | −35% a −55% |
+| 0–14 | −56% a −80% |
 
 ### Prosperidade
 
@@ -1177,7 +1219,69 @@ impostos e de zonas comerciais. É exibida no painel **Economia**.
 
 ---
 
-## 14. Estrutura do código
+## 14. Estradas e ferrovias
+
+Uma cidade pode ligar-se a **outras cidades da mesma facção** por **estradas**
+e **ferrovias**. As vias aceleram o movimento das tropas e dão um pequeno
+boost de prosperidade.
+
+### Traçado (A\*)
+
+O caminho entre duas cidades é o **mais curto** achado por **A\*** (8
+direções, heurística de Chebyshev), passando **só por tiles possuídos pela
+facção** — não há como construir via em tiles que não são seus. Se não houver
+um caminho contínuo de tiles próprios, as cidades **não podem ser ligadas**
+("sem conexão"). A via é assentada nos tiles **intermediários** (as duas
+cidades das pontas não recebem via).
+
+### Estrada × ferrovia
+
+- A **estrada** liga duas cidades por tiles próprios.
+- A **ferrovia** é um **upgrade da estrada**: só pode ser construída onde
+  **já existe uma via** ligando as duas cidades — ela melhora o traçado
+  existente.
+
+### Custo
+
+| Via      | Produção / tile | Dinheiro / tile |
+|----------|-----------------|-----------------|
+| Estrada  | 200             | 1.500           |
+| Ferrovia | 600 (3×)        | 4.500 (3×)      |
+
+O custo de uma ligação é `custo por tile × nº de tiles do caminho` (fora as
+duas cidades). O jogador vê o custo **antes** de mandar construir. O
+**dinheiro** é cobrado na hora; a **produção** é gasta turno a turno pela fila
+da cidade (uma ordem por turno, como recrutamento e construção). Cancelar uma
+ordem **devolve o dinheiro** pago.
+
+### Movimento das tropas
+
+Cada esquadrão tem `move_allowance` movimentos por turno (1 por padrão) e
+`moves_used` para os já gastos — ambos zerados a cada turno. Ao **entrar**
+num tile com via, o `move_allowance` sobe para `2` (estrada) ou `3`
+(ferrovia), permitindo andar **2 tiles num turno por estrada** ou **3 por
+ferrovia**. O 1º movimento do turno vale sempre. Sair de um **tile gelado**
+continua levando 2 turnos (seção 10).
+
+### Boost de prosperidade
+
+Uma cidade ligada **por estrada** a outra cidade da facção soma **+0,5%** ao
+crescimento de prosperidade; se a ligação for **por ferrovia**, **+1,5%**
+(3×). O bônus é somado ao das construções (seção 13). Com 5 cidades ligadas:
++2,5% por estrada ou +7,5% por ferrovia — perceptível, mas longe de quebrar o
+jogo (o crescimento-base é 0,1/turno).
+
+### Interface
+
+O painel da cidade tem a aba **Estradas**: lista as outras cidades da facção
+com o **custo** de ligar por estrada (e, quando já há estrada, por ferrovia),
+um botão **Construir** e a **fila de estradas** (com cancelar). No mapa, os
+tiles de via desenham linhas ligando-se às vias e cidades vizinhas — marrom
+para estrada, cinza-aço para ferrovia.
+
+---
+
+## 15. Estrutura do código
 
 ```
 apps/desktop/src/
@@ -1201,6 +1305,7 @@ apps/desktop/src/
     ├── squads.ts         esquadrões, tropas, recrutamento e inventário
     ├── cities.ts         cidades, colonos e fundação de cidades
     ├── constructions.ts  setores, construções e fila de construção
+    ├── roads.ts          estradas/ferrovias: A\*, custos e fila de estradas
     ├── battle.ts         resolução de combate (dano, debuffs de ambiente)
     ├── map-generator.ts  geração procedural do mapa
     ├── world.ts          esquema SQLite, persistência e avanço de turno
@@ -1209,7 +1314,7 @@ apps/desktop/src/
 
 ---
 
-## 15. Roteiro (próximos passos)
+## 16. Roteiro (próximos passos)
 
 1. ~~**Escolher nação** — na tela "Novo jogo", o jogador pica a facção.~~
    **Implementado** (seção 5): escolher uma nação fixa ou criar a sua.

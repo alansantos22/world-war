@@ -257,6 +257,34 @@ export function cityHappiness(
   );
 }
 
+/** Interpolação linear de `h` na faixa `[lo, hi]` para a saída `[outLo, outHi]`. */
+function lerp(
+  h: number,
+  lo: number,
+  hi: number,
+  outLo: number,
+  outHi: number,
+): number {
+  const t = Math.max(0, Math.min(1, (h - lo) / (hi - lo)));
+  return outLo + (outHi - outLo) * t;
+}
+
+/**
+ * Modificador de crescimento populacional conferido pela **felicidade da
+ * cidade** (50 é neutro). Positivo acelera o crescimento e freia o decaimento;
+ * negativo faz o contrário.
+ */
+export function happinessGrowthModifier(happiness: number): number {
+  if (happiness >= 100) return 0.7;
+  if (happiness >= 86) return lerp(happiness, 86, 99, 0.36, 0.5);
+  if (happiness >= 71) return lerp(happiness, 71, 85, 0.21, 0.35);
+  if (happiness >= 51) return lerp(happiness, 51, 70, 0.1, 0.2);
+  if (happiness >= 50) return 0;
+  if (happiness >= 30) return lerp(happiness, 49, 30, -0.1, -0.2);
+  if (happiness >= 15) return lerp(happiness, 29, 15, -0.35, -0.55);
+  return lerp(happiness, 14, 0, -0.56, -0.8);
+}
+
 /**
  * Renda de imposto de uma cidade por turno: `1` de dinheiro a cada `250` de
  * população, ajustada pelo nível de imposto e pelo direcionamento.

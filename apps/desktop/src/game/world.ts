@@ -18,6 +18,7 @@ import {
   areaBonus,
   happinessFor,
   cityHappiness,
+  happinessGrowthModifier,
   initialProsperity,
   prosperityCap,
   prosperityGrowthMult,
@@ -63,6 +64,14 @@ import {
 } from './cities';
 import { resourceInfo } from './resources';
 import {
+  loadRoadOrders,
+  connectedCities,
+  ROAD_PROSPERITY,
+  RAIL_PROSPERITY,
+  type RoadKind,
+  type RoadOrder,
+} from './roads';
+import {
   loadConstructions,
   loadConstructionOrders,
   CONSTRUCTIONS,
@@ -103,6 +112,8 @@ export interface Province extends TerritoryProduction {
   conquered: boolean;
   /** Setor em que o tile foi especializado, ou `null` (ver `constructions.ts`). */
   sector: Sector | null;
+  /** Via do tile (`ROAD`/`RAIL`), ou `null` (ver `roads.ts`). */
+  road: RoadKind | null;
 }
 
 interface ProvinceRow {
@@ -125,6 +136,7 @@ interface ProvinceRow {
   defender_hp: number;
   conquered: number;
   sector: string | null;
+  road: string | null;
 }
 
 interface FactionRow {
@@ -281,7 +293,9 @@ export async function ensureSchema(): Promise<void> {
       attacks_used    INTEGER NOT NULL DEFAULT 0,
       moral           INTEGER NOT NULL DEFAULT 100,
       cmd_tradition   INTEGER NOT NULL DEFAULT 0,
-      name            TEXT
+      name            TEXT,
+      moves_used      INTEGER NOT NULL DEFAULT 0,
+      move_allowance  INTEGER NOT NULL DEFAULT 1
     )
   `);
   // Migração: colunas de combate (esquadrões anteriores ao sistema de batalha).
@@ -306,6 +320,17 @@ export async function ensureSchema(): Promise<void> {
   }
   if (!haveSquadCol.has('name')) {
     await db.execute('ALTER TABLE squads ADD COLUMN name TEXT');
+  }
+  // Migração: colunas de movimento por estrada.
+  if (!haveSquadCol.has('moves_used')) {
+    await db.execute(
+      'ALTER TABLE squads ADD COLUMN moves_used INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+  if (!haveSquadCol.has('move_allowance')) {
+    await db.execute(
+      'ALTER TABLE squads ADD COLUMN move_allowance INTEGER NOT NULL DEFAULT 1',
+    );
   }
 
   // Tropas de cada esquadrão (o comandante é parte do próprio esquadrão).
@@ -382,9 +407,17 @@ export async function ensureSchema(): Promise<void> {
       population   INTEGER NOT NULL,
       food         INTEGER NOT NULL,
       manpower_cap INTEGER NOT NULL DEFAULT 0,
-      founded_turn INTEGER NOT NULL DEFAULT 1
+      founded_turn INTEGER NOT NULL DEFAULT 1,
+      name         TEXT
     )
   `);
+  // Migração: a coluna do nome dado pelo jogador à cidade.
+  const cityCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(cities)',
+  );
+  if (!cityCols.some((c) => c.name === 'name')) {
+    await db.execute('ALTER TABLE cities ADD COLUMN name TEXT');
+  }
 
   // Esquadrões de colonos — unidades civis que fundam cidades.
   await db.execute(`
@@ -454,6 +487,24 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
+  // Fila de estradas — uma fila por cidade; `path` é o traçado (JSON de tiles).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS road_orders (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      save_id    INTEGER NOT NULL,
+      city_x     INTEGER NOT NULL,
+      city_y     INTEGER NOT NULL,
+      owner_code TEXT    NOT NULL,
+      kind       TEXT    NOT NULL,
+      target_x   INTEGER NOT NULL,
+      target_y   INTEGER NOT NULL,
+      path       TEXT    NOT NULL,
+      prod_cost  INTEGER NOT NULL,
+      prod_done  INTEGER NOT NULL DEFAULT 0,
+      money_cost INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
   const cols = await db.select<{ name: string }[]>(
     'PRAGMA table_info(provinces)',
   );
@@ -479,7 +530,8 @@ export async function ensureSchema(): Promise<void> {
         volcano       INTEGER NOT NULL DEFAULT 0,
         defender_hp   INTEGER NOT NULL DEFAULT 0,
         conquered     INTEGER NOT NULL DEFAULT 0,
-        sector        TEXT
+        sector        TEXT,
+        road          TEXT
       )
     `);
   } else if (!cols.some((c) => c.name === 'save_id')) {
@@ -531,6 +583,10 @@ export async function ensureSchema(): Promise<void> {
   if (!haveProvCol.has('sector')) {
     await db.execute('ALTER TABLE provinces ADD COLUMN sector TEXT');
   }
+  // Migração: a coluna da via (estrada/ferrovia) do tile.
+  if (!haveProvCol.has('road')) {
+    await db.execute('ALTER TABLE provinces ADD COLUMN road TEXT');
+  }
   // Migração: o setor residencial foi renomeado para urbano.
   await db.execute(
     "UPDATE provinces SET sector = 'URBANO' WHERE sector = 'RESIDENCIAL'",
@@ -558,6 +614,7 @@ function rowToProvince(r: ProvinceRow): Province {
     defenderHp: r.defender_hp,
     conquered: r.conquered === 1,
     sector: (r.sector as Sector | null) ?? null,
+    road: (r.road as RoadKind | null) ?? null,
   };
 }
 
@@ -928,6 +985,7 @@ export async function regenerateMap(saveId: number): Promise<Province[]> {
   await db.execute('DELETE FROM constructions WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM construction_orders WHERE save_id = ?', [saveId]);
   await db.execute('DELETE FROM city_resources WHERE save_id = ?', [saveId]);
+  await db.execute('DELETE FROM road_orders WHERE save_id = ?', [saveId]);
   const map = generateMap(buildSeeds(save.customNation?.continent ?? null));
   await insertProvinces(saveId, map.provinces);
   // As facções são mantidas no "Novo mapa", então as capitais são semeadas
@@ -1344,6 +1402,26 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
   }
 
+  // Processa a fila de estradas — uma por cidade, em paralelo às outras.
+  const roadOrders = await loadRoadOrders(saveId);
+  const rFrontByCity = new Map<string, RoadOrder>();
+  for (const o of roadOrders) {
+    const k = `${o.cityX},${o.cityY}`;
+    if (!rFrontByCity.has(k)) rFrontByCity.set(k, o);
+  }
+  const rOrderProgress: { id: number; prodDone: number }[] = [];
+  const rFinished: number[] = [];
+  const newRoads: { kind: RoadKind; path: { x: number; y: number }[] }[] = [];
+  for (const [k, front] of rFrontByCity) {
+    const done = front.prodDone + effProdAt(k);
+    if (done >= front.prodCost) {
+      rFinished.push(front.id);
+      newRoads.push({ kind: front.kind, path: front.path });
+    } else {
+      rOrderProgress.push({ id: front.id, prodDone: done });
+    }
+  }
+
   // Ciclo de turno das cidades: comida, crescimento da população e manpower.
   const ownedTilesByFaction = new Map<string, Set<string>>();
   for (const p of provinces) {
@@ -1394,17 +1472,23 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
     let food = Math.min(calc.foodCapacity, c.food + prod);
     let population = c.population;
+    // A felicidade da cidade acelera/freia o crescimento e o decaimento.
+    const happMod = happinessGrowthModifier(calc.happiness);
     if (food >= cons) {
       food -= cons;
-      // Cada ponto de comida em excedente faz a população crescer 1%.
+      // Cada ponto de comida em excedente faz a população crescer 1% — a
+      // felicidade amplia (ou reduz) esse crescimento.
       const surplus = prod - cons;
       if (surplus > 0) {
-        population = Math.round(population * (1 + surplus / 100));
+        const growth = population * (surplus / 100) * (1 + happMod);
+        population = Math.round(population + growth);
       }
     } else {
-      // Sem comida para o mínimo: a cidade perde 3% da população.
+      // Sem comida para o mínimo: a cidade perde 3% da população — a felicidade
+      // alta freia a perda, a baixa a acelera.
       food = 0;
-      population = Math.round(population * (1 - STARVATION_LOSS));
+      const loss = population * STARVATION_LOSS * (1 - happMod);
+      population = Math.max(0, Math.round(population - loss));
     }
     // A população não cresce além do teto da cidade (+ conjuntos/áreas urbanas).
     population = Math.min(cityPopCap(c) + calc.popCapBonus, population);
@@ -1450,8 +1534,31 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     }
   }
 
+  // Boost de prosperidade das cidades ligadas por estrada/ferrovia.
+  const allRoadTiles = new Set<string>();
+  const railTiles = new Set<string>();
+  for (const p of provinces) {
+    if (!p.road) continue;
+    allRoadTiles.add(`${p.x},${p.y}`);
+    if (p.road === 'RAIL') railTiles.add(`${p.x},${p.y}`);
+  }
+  const roadConn = connectedCities(cities, allRoadTiles);
+  const railConn = connectedCities(cities, railTiles);
+  const roadProsperity = new Map<string, number>();
+  for (const c of cities) {
+    const k = `${c.x},${c.y}`;
+    const b = railConn.has(k)
+      ? RAIL_PROSPERITY
+      : roadConn.has(k)
+        ? ROAD_PROSPERITY
+        : 0;
+    if (b > 0) {
+      roadProsperity.set(c.ownerCode, (roadProsperity.get(c.ownerCode) ?? 0) + b);
+    }
+  }
+
   // Prosperidade de cada facção: cresce devagar (mais rápido com imposto baixo
-  // e com construções de prosperidade) e decai se ficar acima do teto.
+  // e com construções/estradas) e decai se ficar acima do teto.
   const prosperityNext = new Map<string, number>();
   for (const f of factions) {
     const align = alignOf(f.code);
@@ -1460,7 +1567,7 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       align,
       factionHappiness.get(f.code) ?? happinessFor(tax),
     );
-    let consBonus = 0;
+    let consBonus = roadProsperity.get(f.code) ?? 0;
     for (const con of constructions) {
       if (con.ownerCode === f.code) {
         consBonus += CONSTRUCTIONS[con.kind].prosperityGrowth ?? 0;
@@ -1580,6 +1687,24 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
         [saveId, nc.x, nc.y, nc.cityX, nc.cityY, nc.ownerCode, nc.kind, nc.variant],
       );
     }
+    // Avança / conclui a fila de estradas — os tiles do caminho viram via.
+    for (const u of rOrderProgress) {
+      await db.execute('UPDATE road_orders SET prod_done = ? WHERE id = ?', [
+        u.prodDone,
+        u.id,
+      ]);
+    }
+    for (const id of rFinished) {
+      await db.execute('DELETE FROM road_orders WHERE id = ?', [id]);
+    }
+    for (const r of newRoads) {
+      for (const tile of r.path) {
+        await db.execute(
+          'UPDATE provinces SET road = ? WHERE save_id = ? AND x = ? AND y = ?',
+          [r.kind, saveId, tile.x, tile.y],
+        );
+      }
+    }
     // Grava o estoque de recursos das cidades após coleta e consumo.
     for (const c of cities) {
       const finalMap = cityCalc.get(`${c.x},${c.y}`)?.resourceFinal;
@@ -1619,10 +1744,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
         m.id,
       ]);
     }
-    // Devolve a todos os esquadrões os seus ataques do turno.
-    await db.execute('UPDATE squads SET attacks_used = 0 WHERE save_id = ?', [
-      saveId,
-    ]);
+    // Devolve a todos os esquadrões os seus ataques e movimentos do turno.
+    await db.execute(
+      'UPDATE squads SET attacks_used = 0, moves_used = 0, move_allowance = 1 WHERE save_id = ?',
+      [saveId],
+    );
     await db.execute('UPDATE saves SET turn = ?, updated_at = ? WHERE id = ?', [
       turn,
       new Date().toISOString(),
