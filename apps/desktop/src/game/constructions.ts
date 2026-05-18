@@ -16,6 +16,7 @@ import { ResourceType } from './enums';
 import { ClimateZone } from './climate';
 import { resourceInfo, resourceBoost } from './resources';
 import type { AlignmentId } from './alignments';
+import { loadLawModifiers } from './laws';
 
 // ===== Setores =====
 
@@ -1229,6 +1230,16 @@ export async function queueConstruction(
   const db = await getDb();
   const def = CONSTRUCTIONS[kind];
   const cost = constructionCost(kind, alignment, resource);
+  // As leis (ex.: Plano de Obras Públicas, Licenciamento) ajustam o custo.
+  const lm = await loadLawModifiers(saveId, ownerCode);
+  const moneyCost = Math.max(
+    0,
+    Math.round(cost.moneyCost * (1 + lm.CONSTRUCTION_MONEY_PCT / 100)),
+  );
+  const prodCost = Math.max(
+    1,
+    Math.round(cost.prodCost * (1 + lm.CONSTRUCTION_PROD_PCT / 100)),
+  );
 
   if (isConstructionForbidden(kind, alignment)) {
     throw new Error(`${def.label} não é permitida pelo seu direcionamento.`);
@@ -1261,8 +1272,8 @@ export async function queueConstruction(
     'SELECT money FROM factions WHERE save_id = ? AND code = ?',
     [saveId, ownerCode],
   );
-  if (!rows[0] || rows[0].money < cost.moneyCost) {
-    throw new Error(`Dinheiro insuficiente (${cost.moneyCost}).`);
+  if (!rows[0] || rows[0].money < moneyCost) {
+    throw new Error(`Dinheiro insuficiente (${moneyCost}).`);
   }
 
   // Recursos do estoque da cidade consumidos ao enfileirar.
@@ -1286,10 +1297,10 @@ export async function queueConstruction(
 
   await db.execute('BEGIN');
   try {
-    if (cost.moneyCost > 0) {
+    if (moneyCost > 0) {
       await db.execute(
         'UPDATE factions SET money = money - ? WHERE save_id = ? AND code = ?',
-        [cost.moneyCost, saveId, ownerCode],
+        [moneyCost, saveId, ownerCode],
       );
     }
     if (resCost) {
@@ -1315,8 +1326,8 @@ export async function queueConstruction(
         ownerCode,
         kind,
         variant,
-        cost.prodCost,
-        cost.moneyCost,
+        prodCost,
+        moneyCost,
       ],
     );
     await db.execute('COMMIT');

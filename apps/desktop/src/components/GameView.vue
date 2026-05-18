@@ -163,15 +163,26 @@ import {
   LAW_QUALITIES,
   LAW_QUALITY_LIST,
   PACK_COST,
+  PREMIUM_PACK_COST,
+  LAW_REFUND,
+  LAW_SWAP_INTERVAL,
   MAX_SLOT_TIER,
+  lawEffectLines,
+  canSwapLaws,
+  nextSwapTurn,
   nextSlotExpansion,
   loadFactionLaws,
+  loadLawModifiers,
+  emptyLawModifiers,
   openLawPack,
+  openPremiumPack,
+  sellLawCard,
   setActiveLaw,
   expandLawSlots,
   type LawId,
   type LawQuality,
   type FactionLaws,
+  type LawModifiers,
 } from "../game/laws";
 import { loadSettings } from "../settings";
 
@@ -263,6 +274,8 @@ const showLaws = ref(false);
 const lawsTab = ref<"active" | "inventory">("active");
 /** Estado de leis da facção do jogador (espaços, ativas, inventário). */
 const factionLaws = ref<FactionLaws | null>(null);
+/** Modificadores agregados das leis ativas do jogador (prévias da economia). */
+const playerLawMods = ref<LawModifiers>(emptyLawModifiers());
 /** `true` enquanto uma ação de lei (pacote, troca, expansão) está em curso. */
 const busyLaws = ref(false);
 /** Espaço de lei aguardando a escolha de uma carta do inventário. */
@@ -488,6 +501,7 @@ async function load() {
     roadOrders.value = await loadRoadOrders(props.saveId);
     cityResources.value = await loadCityResources(props.saveId);
     battleLogs.value = await loadBattleLogs(props.saveId);
+    await refreshLawMods();
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -507,6 +521,7 @@ async function reloadState() {
   roadOrders.value = await loadRoadOrders(props.saveId);
   cityResources.value = await loadCityResources(props.saveId);
   factions.value = await loadFactions(props.saveId);
+  await refreshLawMods();
 }
 
 async function newMap() {
@@ -1404,18 +1419,48 @@ const selectedCityHappiness = computed(() => {
   return cityHappiness(playerTaxLevel.value, bonus);
 });
 
-/** Custo de uma construção no tile selecionado (varia com recurso e direcionamento). */
+/**
+ * Custo de uma construção no tile selecionado — varia com recurso,
+ * direcionamento e as **leis ativas** (custo em dinheiro e em produção).
+ */
 function costOf(kind: ConstructionKind) {
-  return constructionCost(kind, playerAlignment.value, selected.value?.resource);
+  const base = constructionCost(
+    kind,
+    playerAlignment.value,
+    selected.value?.resource,
+  );
+  const lm = playerLawMods.value;
+  return {
+    prodCost: Math.max(
+      1,
+      Math.round(base.prodCost * (1 + lm.CONSTRUCTION_PROD_PCT / 100)),
+    ),
+    moneyCost: Math.max(
+      0,
+      Math.round(base.moneyCost * (1 + lm.CONSTRUCTION_MONEY_PCT / 100)),
+    ),
+  };
 }
 
-/** Manutenção por turno de uma construção, já com o desconto do direcionamento. */
+/** Manutenção por turno de uma construção, com o direcionamento e as leis. */
 function upkeepOf(kind: ConstructionKind): number {
   return Math.round(
     CONSTRUCTIONS[kind].upkeep *
-      ALIGNMENT_ECONOMY[playerAlignment.value].upkeepMult,
+      ALIGNMENT_ECONOMY[playerAlignment.value].upkeepMult *
+      (1 + playerLawMods.value.CONSTRUCTION_UPKEEP_PCT / 100),
   );
 }
+
+/** Custo em dinheiro de recrutar uma tropa, já com o ajuste das leis. */
+const recruitTroopCost = computed(() =>
+  Math.max(
+    0,
+    Math.round(
+      TROOP_TYPES.INFANTARIA.moneyCost *
+        (1 + playerLawMods.value.RECRUIT_MONEY_PCT / 100),
+    ),
+  ),
+);
 
 /** Atribui (ou limpa, com `null`) o setor do tile selecionado. */
 async function doAssignSector(sector: Sector | null) {
@@ -1562,7 +1607,10 @@ const playerHappiness = computed(() => {
     const bonus = constructions.value
       .filter((x) => x.cityX === c.x && x.cityY === c.y)
       .reduce((s, x) => s + (CONSTRUCTIONS[x.kind].happiness ?? 0), 0);
-    sum += cityHappiness(playerTaxLevel.value, bonus);
+    sum += cityHappiness(
+      playerTaxLevel.value,
+      bonus + playerLawMods.value.HAPPINESS_FLAT,
+    );
   }
   return Math.round(sum / myCities.length);
 });
@@ -1593,11 +1641,14 @@ const incomeSummary = computed(() => {
   const prosMult = prosperityIncomeMultiplier(
     playerFaction.value?.prosperity ?? 40,
   );
+  const lm = playerLawMods.value;
   let tax = 0;
   let factoryMoney = 0;
   let commercial = 0;
+  let factionPop = 0;
   for (const c of cities.value) {
     if (c.ownerCode !== code) continue;
+    factionPop += c.population;
     tax += cityTaxIncome(c.population, playerTaxLevel.value, align);
     const cityCons = constructions.value.filter(
       (x) => x.cityX === c.x && x.cityY === c.y,
@@ -1608,24 +1659,38 @@ const incomeSummary = computed(() => {
       commercial += constructionMoneyPerTurn(x.kind, align);
     }
   }
-  const taxIncome = Math.round(tax * prosMult);
+  // As leis ativas ajustam cada fonte de renda.
+  const taxIncome = Math.round(tax * prosMult * (1 + lm.TAX_PCT / 100));
   const factoryIncome = Math.round(
-    factoryMoney * econ.industrialMult * (1 + bonus.industrial),
+    factoryMoney *
+      econ.industrialMult *
+      (1 + bonus.industrial) *
+      (1 + lm.FACTORY_PCT / 100),
   );
   const commercialIncome = Math.round(
-    commercial * econ.commercialMult * (1 + bonus.commercial) * prosMult,
+    commercial *
+      econ.commercialMult *
+      (1 + bonus.commercial) *
+      prosMult *
+      (1 + lm.COMMERCIAL_PCT / 100),
   );
+  // Dinheiro fixo das leis (Concessões, Monopólio…) e o custo da seguridade.
+  const lawsMoney =
+    lm.MONEY_FLAT +
+    Math.round((lm.WELFARE_PER_100K * factionPop) / 100_000);
   // Manutenção das construções erguidas — despesa fixa por turno, com o
-  // desconto de manutenção do direcionamento.
+  // desconto do direcionamento e o ajuste das leis.
   const constructionUpkeep = Math.round(
     playerCons.reduce((s, c) => s + CONSTRUCTIONS[c.kind].upkeep, 0) *
-      econ.upkeepMult,
+      econ.upkeepMult *
+      (1 + lm.CONSTRUCTION_UPKEEP_PCT / 100),
   );
   return {
     tax: taxIncome,
     factory: factoryIncome,
     commercial: commercialIncome,
-    total: taxIncome + factoryIncome + commercialIncome,
+    laws: lawsMoney,
+    total: taxIncome + factoryIncome + commercialIncome + lawsMoney,
     constructionUpkeep,
   };
 });
@@ -1898,11 +1963,21 @@ async function openLaws() {
   }
 }
 
+/** Recarrega os modificadores de leis do jogador (prévias da economia). */
+async function refreshLawMods() {
+  if (!game.value?.playerCode) return;
+  playerLawMods.value = await loadLawModifiers(
+    props.saveId,
+    game.value.playerCode,
+  );
+}
+
 /** Recarrega o estado de leis e as facções (a cultura muda com as ações). */
 async function reloadLaws() {
   if (!game.value?.playerCode) return;
   factionLaws.value = await loadFactionLaws(props.saveId, game.value.playerCode);
   factions.value = await loadFactions(props.saveId);
+  await refreshLawMods();
 }
 
 /** Compra e abre um pacote de leis (custa cultura). */
@@ -1918,6 +1993,40 @@ async function doBuyPack() {
     packFlipTimer = setTimeout(() => {
       if (packReveal.value) packReveal.value.flipped = true;
     }, 900);
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  } finally {
+    busyLaws.value = false;
+  }
+}
+
+/** Compra e abre um pacote premium — carta inédita, custa mais cultura. */
+async function doBuyPremiumPack() {
+  if (!game.value?.playerCode || busyLaws.value) return;
+  busyLaws.value = true;
+  try {
+    const lawId = await openPremiumPack(props.saveId, game.value.playerCode);
+    await reloadLaws();
+    clearTimeout(packFlipTimer);
+    packReveal.value = { lawId, flipped: false };
+    packFlipTimer = setTimeout(() => {
+      if (packReveal.value) packReveal.value.flipped = true;
+    }, 900);
+  } catch (e) {
+    flashToast(e instanceof Error ? e.message : String(e));
+  } finally {
+    busyLaws.value = false;
+  }
+}
+
+/** Vende uma carta do inventário por cultura (reembolso). */
+async function doSellLaw(lawId: LawId) {
+  if (!game.value?.playerCode || busyLaws.value) return;
+  busyLaws.value = true;
+  try {
+    await sellLawCard(props.saveId, game.value.playerCode, lawId);
+    await reloadLaws();
+    flashToast(`Carta vendida — +${LAW_REFUND} de cultura.`);
   } catch (e) {
     flashToast(e instanceof Error ? e.message : String(e));
   } finally {
@@ -2009,6 +2118,16 @@ const lawGroups = computed(() =>
     })),
   })),
 );
+
+/** `true` se o turno atual está na janela de troca de leis. */
+const canLawSwapNow = computed(() => canSwapLaws(turn.value));
+/** Próximo turno em que será possível trocar leis. */
+const nextLawSwapTurn = computed(() => nextSwapTurn(turn.value));
+
+/** `true` se a carta tem cópias sobrando além da ativa — pode ser vendida. */
+function lawSellable(entry: { lawId: LawId; count: number }): boolean {
+  return entry.count > (activeLawIdSet.value.has(entry.lawId) ? 1 : 0);
+}
 
 /** Esquadrão de origem da tropa que está sendo movida. */
 const moveTroopSource = computed<Squad | null>(() => {
@@ -3407,7 +3526,7 @@ function provinceFill(p: Province): string {
                     </div>
                     <div class="rc-troop-costs">
                       <span title="Custo em dinheiro">
-                        💰 {{ TROOP_TYPES.INFANTARIA.moneyCost }}
+                        💰 {{ recruitTroopCost }}
                       </span>
                       <span title="Custo em manpower">
                         🪖 {{ TROOP_TYPES.INFANTARIA.manpowerCost }}
@@ -3425,8 +3544,7 @@ function provinceFill(p: Province): string {
                   class="squad-create rc-recruit-btn"
                   :disabled="
                     busySquad ||
-                    (playerFaction?.money ?? 0) <
-                      TROOP_TYPES.INFANTARIA.moneyCost ||
+                    (playerFaction?.money ?? 0) < recruitTroopCost ||
                     (playerFaction?.manpower ?? 0) <
                       TROOP_TYPES.INFANTARIA.manpowerCost
                   "
@@ -4096,9 +4214,19 @@ function provinceFill(p: Province): string {
                   <span>🏭 Zonas de fábrica</span>
                   <span class="up">+{{ fmt(incomeSummary.factory) }}</span>
                 </div>
+                <div v-if="incomeSummary.laws !== 0" class="econ-line">
+                  <span>📜 Leis (dinheiro fixo)</span>
+                  <span :class="incomeSummary.laws >= 0 ? 'up' : 'down'">
+                    {{ incomeSummary.laws >= 0 ? "+" : ""
+                    }}{{ fmt(incomeSummary.laws) }}
+                  </span>
+                </div>
                 <div class="econ-line total">
                   <span>Renda total</span>
-                  <span class="up">+{{ fmt(incomeSummary.total) }}</span>
+                  <span :class="incomeSummary.total >= 0 ? 'up' : 'down'">
+                    {{ incomeSummary.total >= 0 ? "+" : ""
+                    }}{{ fmt(incomeSummary.total) }}
+                  </span>
                 </div>
                 <div class="econ-line">
                   <span>🔧 Manutenção das construções</span>
@@ -4575,8 +4703,15 @@ function provinceFill(p: Province): string {
               <template v-else-if="lawsTab === 'active'">
                 <p class="laws-intro">
                   As leis preenchem espaços divididos igualmente entre boas,
-                  neutras e ruins. Cada espaço pode ser trocado por uma carta
-                  do seu inventário da mesma qualidade.
+                  neutras e ruins. O espaço neutro travado (🔒) é a lei da
+                  nação — fixa. Os demais só mudam na janela de troca.
+                </p>
+                <p class="laws-window" :class="{ open: canLawSwapNow }">
+                  {{
+                    canLawSwapNow
+                      ? "✅ Janela de troca aberta — troque as leis que quiser neste turno."
+                      : `🔒 Troca fechada — abre a cada ${LAW_SWAP_INTERVAL} turnos (próxima: turno ${nextLawSwapTurn}).`
+                  }}
                 </p>
                 <div
                   v-for="g in lawGroups"
@@ -4629,7 +4764,7 @@ function provinceFill(p: Province): string {
                         </div>
                         <ul class="lc-effects">
                           <li
-                            v-for="(ef, i) in LAW_CARDS[s.lawId].effects"
+                            v-for="(ef, i) in lawEffectLines(LAW_CARDS[s.lawId])"
                             :key="i"
                             :class="ef.good ? 'up' : 'down'"
                           >
@@ -4639,14 +4774,27 @@ function provinceFill(p: Province): string {
                         <p class="lc-flavor">{{ LAW_CARDS[s.lawId].flavor }}</p>
                       </div>
                       <div v-else class="law-card law-card-empty">Vazio</div>
+                      <span
+                        v-if="g.quality.id === 'NEUTRA' && s.slotIndex === 0"
+                        class="law-locked"
+                        title="A lei da nação é fixa e não pode ser trocada."
+                      >
+                        🔒 Lei da nação
+                      </span>
                       <button
+                        v-else
                         class="mini-btn law-swap-btn"
                         :class="{
                           on:
                             lawSwapTarget?.quality === g.quality.id &&
                             lawSwapTarget?.slotIndex === s.slotIndex,
                         }"
-                        :disabled="busyLaws"
+                        :disabled="busyLaws || !canLawSwapNow"
+                        :title="
+                          canLawSwapNow
+                            ? 'Trocar esta lei'
+                            : 'Fora da janela de troca de leis'
+                        "
                         @click="startLawSwap(g.quality.id, s.slotIndex)"
                       >
                         Trocar
@@ -4686,9 +4834,17 @@ function provinceFill(p: Province): string {
                   >
                     🎴 Comprar pacote de leis — {{ PACK_COST }} 🎭
                   </button>
+                  <button
+                    class="on"
+                    :disabled="busyLaws || playerCulture < PREMIUM_PACK_COST"
+                    @click="doBuyPremiumPack"
+                  >
+                    🌟 Pacote premium — {{ fmt(PREMIUM_PACK_COST) }} 🎭
+                  </button>
                   <p class="laws-note">
-                    O pacote sorteia uma carta — boa, neutra ou ruim — para o
-                    seu inventário. Cartas boas são as mais raras.
+                    O pacote comum sorteia uma carta (boa, neutra ou ruim) —
+                    cartas boas são as mais raras. O pacote premium custa mais,
+                    mas garante uma carta que você ainda não tem.
                   </p>
                 </div>
 
@@ -4748,7 +4904,7 @@ function provinceFill(p: Province): string {
                       </div>
                       <ul class="lc-effects">
                         <li
-                          v-for="(ef, i) in LAW_CARDS[entry.lawId].effects"
+                          v-for="(ef, i) in lawEffectLines(LAW_CARDS[entry.lawId])"
                           :key="i"
                           :class="ef.good ? 'up' : 'down'"
                         >
@@ -4770,13 +4926,25 @@ function provinceFill(p: Province): string {
                     >
                       Colocar no espaço
                     </button>
-                    <span
-                      v-else-if="activeLawIdSet.has(entry.lawId)"
-                      class="law-active-tag"
-                    >
-                      ✓ Ativa
-                    </span>
-                    <span v-else class="law-active-tag dim">No inventário</span>
+                    <template v-else>
+                      <span
+                        v-if="activeLawIdSet.has(entry.lawId)"
+                        class="law-active-tag"
+                      >
+                        ✓ Ativa
+                      </span>
+                      <span v-else class="law-active-tag dim">
+                        No inventário
+                      </span>
+                      <button
+                        v-if="lawSellable(entry)"
+                        class="mini-btn"
+                        :disabled="busyLaws"
+                        @click="doSellLaw(entry.lawId)"
+                      >
+                        Vender · {{ LAW_REFUND }} 🎭
+                      </button>
+                    </template>
                   </div>
                 </div>
               </template>
@@ -4833,7 +5001,7 @@ function provinceFill(p: Province): string {
                   </div>
                   <ul class="lc-effects">
                     <li
-                      v-for="(ef, i) in LAW_CARDS[packReveal.lawId].effects"
+                      v-for="(ef, i) in lawEffectLines(LAW_CARDS[packReveal.lawId])"
                       :key="i"
                       :class="ef.good ? 'up' : 'down'"
                     >
@@ -4888,7 +5056,7 @@ function provinceFill(p: Province): string {
                 <div class="lc-name">{{ LAW_CARDS[id].name }}</div>
                 <ul class="lc-effects">
                   <li
-                    v-for="(ef, j) in LAW_CARDS[id].effects"
+                    v-for="(ef, j) in lawEffectLines(LAW_CARDS[id])"
                     :key="j"
                     :class="ef.good ? 'up' : 'down'"
                   >
@@ -6647,6 +6815,28 @@ tr.me {
 .law-swap-btn.on {
   border-color: var(--gold);
   color: var(--gold);
+}
+.law-locked {
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #b884d0;
+  padding: 4px 0;
+}
+.laws-window {
+  font-size: 0.76rem;
+  font-weight: 600;
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: rgba(192, 83, 63, 0.14);
+  border: 1px solid rgba(192, 83, 63, 0.4);
+  color: #e0a99f;
+}
+.laws-window.open {
+  background: rgba(94, 174, 94, 0.14);
+  border-color: rgba(94, 174, 94, 0.4);
+  color: #9ad187;
 }
 .law-active-tag {
   text-align: center;

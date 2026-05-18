@@ -267,6 +267,7 @@ Uma linha por **partida salva**, incluindo a nação do jogador.
 | `custom_color`     | TEXT    | Cor da nação personalizada.                          |
 | `custom_alignment` | TEXT    | Direcionamento da nação personalizada.               |
 | `custom_continent` | TEXT    | Continente inicial da nação personalizada.           |
+| `custom_default_law` | TEXT  | Lei-padrão (neutra) escolhida pela nação personalizada (seção 15). |
 
 ### Tabela `provinces`
 
@@ -1391,36 +1392,70 @@ ruim) e pode crescer:
 | 2     | 2                     | 6           | 1.000 de cultura |
 | 3     | 3                     | 9           | 5.000 de cultura |
 
-Os espaços estão **sempre preenchidos**. Toda facção começa com 1 carta
-sorteada de cada qualidade, já colocada no seu espaço. Ao abrir um nível novo,
-cada espaço novo (1 de cada qualidade) já nasce com uma carta sorteada.
+Os espaços estão **sempre preenchidos**. Ao abrir um nível novo, cada espaço
+novo (1 de cada qualidade) já nasce com uma carta sorteada.
+
+### Lei-padrão da facção
+
+O **espaço neutro nº 0** é a **lei-padrão da facção** — uma lei neutra
+**travada**, que nunca pode ser trocada e dá identidade a cada nação. As 13
+nações fixas têm cada uma a sua (`DEFAULT_LAW_BY_NATION`); a nação
+personalizada **escolhe** a sua, dentre as 30 neutras, na tela de criação
+(guardada em `saves.custom_default_law`). Os demais espaços começam com cartas
+sorteadas.
 
 ### Pacotes de leis
 
 Leis novas saem de **pacotes** comprados com **cultura**, estilo figurinha de
-banca. Cada pacote custa **100 de cultura** e sorteia **uma** carta para o
-**inventário** — pode sair carta repetida. As chances do sorteio favorecem as
-cartas piores (cartas boas são as mais raras):
+banca. Há dois:
 
-| Qualidade | Chance |
-|-----------|--------|
-| Boa       | 25%    |
-| Neutra    | 35%    |
-| Ruim      | 40%    |
+- **Pacote comum** — **100 de cultura**; sorteia uma carta (pode repetir). As
+  chances favorecem as piores: Boa 25%, Neutra 35%, Ruim 40%.
+- **Pacote premium** — **800 de cultura**; garante uma carta que a facção
+  **ainda não tem**.
 
-A abertura do pacote tem uma animação: a carta sai virada de costas e gira
-para revelar a lei. Depois, o jogador pode **trocar** uma lei ativa por outra
-do inventário — desde que a qualidade do espaço seja respeitada (uma carta boa
-só entra num espaço de lei boa, etc.).
+A abertura tem uma animação: a carta sai virada de costas e gira para revelar a
+lei. Uma carta extra do inventário (que não esteja em uso) pode ser **vendida**
+de volta por **25 de cultura** (¼ do pacote comum).
+
+### Janela de troca
+
+As leis ativas só podem ser trocadas em **turnos múltiplos de 20** (turno 20,
+40, 60…). Fora dessa janela, a lei escolhida fica até a próxima — quem pega uma
+lei ruim convive com ela. A lei-padrão (espaço neutro 0) nunca é trocável.
 
 ### Interface
 
 O modal de leis tem duas abas:
 
-- **Leis ativas** — os espaços agrupados por qualidade; cada espaço tem um
-  botão **Trocar**. Abaixo, o botão de **abrir espaços de lei**.
-- **Inventário** — a coleção de cartas (com a quantidade de cópias) e o botão
-  de **comprar pacote**.
+- **Leis ativas** — os espaços agrupados por qualidade; cada um tem o botão
+  **Trocar** (desabilitado fora da janela; o espaço travado mostra 🔒). Um
+  aviso indica se a janela de troca está aberta. Abaixo, o botão de **abrir
+  espaços de lei**.
+- **Inventário** — a coleção de cartas (com a quantidade de cópias), os botões
+  de **comprar pacote** (comum e premium) e o botão **Vender** nas cartas
+  sobressalentes.
+
+### Efeitos
+
+Cada lei tem **efeitos estruturados** (`LawEffect` — um `kind` e um `value`).
+`loadLawModifiers` soma os efeitos das leis ativas de uma facção num
+`LawModifiers`, aplicado em todo o jogo. O texto exibido no card é **gerado** a
+partir do efeito (`lawEffectLine`). Onde cada grupo de efeito age:
+
+- **Economia do turno** (`advanceTurn`) — renda de impostos, comercial e de
+  fábrica; cultura, pesquisa e manpower; produção, comida e energia; teto e
+  crescimento de população; coleta das minas e estoque; prosperidade;
+  manutenção de tropas e construções; dinheiro fixo e influência por turno.
+- **Combate** (`executeBattle`) — `ATTACK_PCT` no esquadrão atacante e
+  `DEFENSE_PCT` no esquadrão defensor.
+- **Custo por ação** — construções (`queueConstruction`: dinheiro e produção),
+  recrutamento de tropas (`queueRecruit`: dinheiro), colonos (`queueRecruit`:
+  produção), XP inicial dos comandantes (`createSquad`) e movimento das tropas
+  (`moveSquad`).
+
+A interface mostra as prévias (renda, custo de construção, recrutamento,
+felicidade) já com as leis aplicadas, então a prévia bate com o turno.
 
 ### Anti-trapaça
 
@@ -1442,13 +1477,12 @@ leis ruins são calibradas um pouco mais leves que as boas, já que o sistema
 
 ### Planejado
 
-- Os efeitos das leis são, por enquanto, apenas **descritivos** (texto no
-  card) — o sistema numérico que aplica os modificadores na economia/combate
-  ainda será integrado.
-- **Leis-padrão da ideologia** — leis inerentes ao direcionamento político da
-  facção, que certos cards poderiam **amenizar** (ex.: uma nação comunista com
-  a "Lei das Zonas de Livre Comércio").
+- Cards que **amenizam** a lei-padrão da facção (ex.: uma nação comunista com
+  uma "zona de livre comércio" que abranda a sua lei estatizante).
 - As **facções da IA** usando leis.
+
+> Nota: `DEFENSE_PCT` só tem efeito visível quando há um esquadrão defensor de
+> uma facção — hoje as batalhas são contra territórios neutros (sem leis).
 
 ---
 
@@ -1518,7 +1552,8 @@ apps/desktop/src/
 11. **Diplomacia e alianças** — mecânica de direcionamento político (seção 4);
    destrava mover-se por território de outras facções e o combate entre
    esquadrões (hoje só se batalha contra territórios neutros).
-12. **Leis** — *parcial*: a **estrutura** do sistema de cards de leis está
-   pronta (seção 15) — espaços, pacotes, inventário e troca de leis. Falta a
-   **lista definitiva de leis** e o **sistema numérico** que aplica os efeitos
-   na economia/combate, além das **leis-padrão da ideologia**.
+12. **Leis** — o sistema de cards de leis está pronto (seção 15): 90 leis,
+   espaços, pacotes (comum e premium), inventário, venda, **efeitos aplicados**
+   (economia, combate e custos), **lei-padrão por facção** e **janela de troca**
+   a cada 20 turnos. Falta só os cards que **amenizam** a lei-padrão e a **IA**
+   usando leis.

@@ -17,6 +17,7 @@
  */
 
 import { getDb } from '../db';
+import { loadLawModifiers } from './laws';
 import { ClimateZone, Season } from './climate';
 import {
   deleteSquad,
@@ -304,6 +305,12 @@ export async function executeBattle(p: BattleParams): Promise<BattleReport> {
   const isTerritory = p.defender.kind === 'territory';
   const defSquad = p.defender.kind === 'squad' ? p.defender.squad : null;
 
+  // Leis das facções envolvidas — atacante e (se houver) esquadrão defensor.
+  const atkLaw = await loadLawModifiers(p.saveId, p.attacker.ownerCode);
+  const defLaw = defSquad
+    ? await loadLawModifiers(p.saveId, defSquad.ownerCode)
+    : null;
+
   // --- Dados + tradição militar (somada uma vez à soma de cada lado) ---
   const atkTradition = p.attacker.commander.tradition;
   const defTradition = defSquad ? defSquad.commander.tradition : 0;
@@ -324,6 +331,9 @@ export async function executeBattle(p: BattleParams): Promise<BattleReport> {
       pct: moralForceDelta(p.attacker.moral) * 100,
     },
   ];
+  if (atkLaw.ATTACK_PCT !== 0) {
+    atkMods.push({ label: 'Doutrina militar (leis)', pct: atkLaw.ATTACK_PCT });
+  }
   const atkForce = Math.round(atkBase * Math.max(0, 1 + sumDeltas(atkMods)));
   const atkDefense = squadDefense(p.attacker);
 
@@ -346,6 +356,9 @@ export async function executeBattle(p: BattleParams): Promise<BattleReport> {
       label: `Moral ${defSquad.moral}%`,
       pct: moralForceDelta(defSquad.moral) * 100,
     });
+  }
+  if (defLaw && defLaw.DEFENSE_PCT !== 0) {
+    defMods.push({ label: 'Defesa nacional (leis)', pct: defLaw.DEFENSE_PCT });
   }
   const defForce = Math.round(defBase * Math.max(0, 1 + sumDeltas(defMods)));
   const defDefense = defSquad ? squadDefense(defSquad) : 0;

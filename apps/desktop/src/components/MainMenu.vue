@@ -5,6 +5,7 @@ import { GRID, allLandCells, CONTINENT_NAMES } from "../game/map-generator";
 import { NATIONS } from "../game/nations";
 import { ALIGNMENTS, ALIGNMENT_LIST, type AlignmentId } from "../game/alignments";
 import { createGame, type NewGameChoice } from "../game/world";
+import { lawsOfQuality, lawEffectLines, type LawId } from "../game/laws";
 import { listSaves, deleteSave, type SaveSummary } from "../game/saves";
 import { loadSettings, saveSettings, type AppSettings } from "../settings";
 
@@ -50,6 +51,15 @@ const customName = ref("");
 const customAlignment = ref<AlignmentId | null>(null);
 const customColor = ref<string | null>(null);
 const customContinent = ref<string | null>(null);
+/** Lei neutra escolhida como lei-padrão (travada) da nação. */
+const customDefaultLaw = ref<LawId | null>(null);
+
+/** As leis neutras — opções para a lei-padrão da nação personalizada. */
+const neutralLaws = lawsOfQuality("NEUTRA");
+/** A lei-padrão escolhida, para a prévia dos efeitos. */
+const customDefaultLawCard = computed(() =>
+  neutralLaws.find((l) => l.id === customDefaultLaw.value) ?? null,
+);
 
 const customFlagSeed = computed(() => customName.value.trim() || "nova-nacao");
 const customPreviewColor = computed(() => customColor.value ?? "#6d7f8c");
@@ -67,6 +77,7 @@ function openNew() {
   customAlignment.value = null;
   customColor.value = null;
   customContinent.value = null;
+  customDefaultLaw.value = null;
   screen.value = "new";
 }
 
@@ -77,7 +88,8 @@ const canCreate = computed(() => {
     !!customName.value.trim() &&
     !!customAlignment.value &&
     !!customColor.value &&
-    !!customContinent.value
+    !!customContinent.value &&
+    !!customDefaultLaw.value
   );
 });
 
@@ -95,6 +107,7 @@ async function confirmNew() {
             color: customColor.value!,
             alignment: customAlignment.value!,
             continent: customContinent.value!,
+            defaultLaw: customDefaultLaw.value!,
           };
     const id = await createGame(newName.value.trim() || defaultName(), choice);
     emit("play", id);
@@ -312,6 +325,31 @@ function fmtDate(iso: string): string {
                 {{ label }}
               </button>
             </div>
+
+            <p class="section-label">Lei da nação</p>
+            <p class="hint">
+              Uma lei neutra fixa, que dá identidade à sua nação — ela ocupa um
+              espaço de lei e não poderá ser trocada depois.
+            </p>
+            <select v-model="customDefaultLaw" class="law-select">
+              <option :value="null" disabled>Escolha uma lei neutra…</option>
+              <option
+                v-for="law in neutralLaws"
+                :key="law.id"
+                :value="law.id"
+              >
+                {{ law.icon }} {{ law.name }}
+              </option>
+            </select>
+            <ul v-if="customDefaultLawCard" class="law-select-effects">
+              <li
+                v-for="(ef, i) in lawEffectLines(customDefaultLawCard)"
+                :key="i"
+                :class="ef.good ? 'up' : 'down'"
+              >
+                {{ ef.good ? "▲" : "▼" }} {{ ef.text }}
+              </li>
+            </ul>
 
             <!-- Prévia da nação -->
             <div class="preview">
@@ -611,6 +649,37 @@ function fmtDate(iso: string): string {
   color: #8a92a0;
   font-size: 0.82rem;
   margin: 4px 0 8px;
+}
+.law-select {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.88rem;
+  color: #e7ebf0;
+  background: #11161f;
+  border: 1px solid #2c3543;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.law-select:focus {
+  outline: none;
+  border-color: #e8c14a;
+}
+.law-select-effects {
+  list-style: none;
+  margin: 8px 0 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.law-select-effects li {
+  font-size: 0.8rem;
+}
+.law-select-effects li.up {
+  color: #8ed08a;
+}
+.law-select-effects li.down {
+  color: #e0917f;
 }
 .err {
   color: #ffb4ae;

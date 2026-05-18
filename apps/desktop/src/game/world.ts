@@ -86,6 +86,12 @@ import {
   type Construction,
   type ConstructionOrder,
 } from './constructions';
+import {
+  loadLawModifiers,
+  emptyLawModifiers,
+  type LawModifiers,
+  type LawId,
+} from './laws';
 
 /** Uma província do mapa já persistida (1 célula de terra, com id do banco). */
 export interface Province extends TerritoryProduction {
@@ -161,6 +167,7 @@ interface SaveRow {
   custom_color: string | null;
   custom_alignment: string | null;
   custom_continent: string | null;
+  custom_default_law: string | null;
 }
 
 /** Uma partida carregada: dados do save + a nação personalizada (se houver). */
@@ -186,6 +193,8 @@ export type NewGameChoice =
       color: string;
       alignment: AlignmentId;
       continent: string;
+      /** Lei neutra escolhida como lei-padrão (travada) da nação. */
+      defaultLaw: LawId;
     };
 
 /**
@@ -207,11 +216,12 @@ export async function ensureSchema(): Promise<void> {
       created_at       TEXT    NOT NULL,
       updated_at       TEXT    NOT NULL,
       turn             INTEGER NOT NULL DEFAULT 1,
-      player_code      TEXT,
-      custom_name      TEXT,
-      custom_color     TEXT,
-      custom_alignment TEXT,
-      custom_continent TEXT
+      player_code       TEXT,
+      custom_name       TEXT,
+      custom_color      TEXT,
+      custom_alignment  TEXT,
+      custom_continent  TEXT,
+      custom_default_law TEXT
     )
   `);
   // Migração: adiciona as colunas da nação do jogador em saves antigos.
@@ -225,6 +235,7 @@ export async function ensureSchema(): Promise<void> {
     'custom_color',
     'custom_alignment',
     'custom_continent',
+    'custom_default_law',
   ]) {
     if (!haveCol.has(col)) {
       await db.execute(`ALTER TABLE saves ADD COLUMN ${col} TEXT`);
@@ -373,9 +384,19 @@ export async function ensureSchema(): Promise<void> {
       squad_id   INTEGER NOT NULL,
       kind       TEXT    NOT NULL,
       prod_cost  INTEGER NOT NULL,
-      prod_done  INTEGER NOT NULL DEFAULT 0
+      prod_done  INTEGER NOT NULL DEFAULT 0,
+      money_cost INTEGER NOT NULL DEFAULT 0
     )
   `);
+  // Migração: a coluna do dinheiro pago (devolvido ao cancelar o recrutamento).
+  const roCols = await db.select<{ name: string }[]>(
+    'PRAGMA table_info(recruit_orders)',
+  );
+  if (!roCols.some((c) => c.name === 'money_cost')) {
+    await db.execute(
+      'ALTER TABLE recruit_orders ADD COLUMN money_cost INTEGER NOT NULL DEFAULT 0',
+    );
+  }
 
   // Histórico de batalhas — uma linha por batalha; `data` é o relatório JSON.
   await db.execute(`
@@ -890,8 +911,9 @@ export async function createGame(
   const res = await db.execute(
     `INSERT INTO saves
        (name, created_at, updated_at, player_code,
-        custom_name, custom_color, custom_alignment, custom_continent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        custom_name, custom_color, custom_alignment, custom_continent,
+        custom_default_law)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       name,
       now,
@@ -901,6 +923,7 @@ export async function createGame(
       isCustom ? choice.color : null,
       isCustom ? choice.alignment : null,
       customContinent,
+      isCustom ? choice.defaultLaw : null,
     ],
   );
   const saveId = res.lastInsertId;
@@ -1093,7 +1116,9 @@ export interface TurnResult {
  *   **moral** (o dobro em território próprio);
  * - todos os esquadrões recuperam os seus **ataques** do turno.
  *
- * A influência ainda não tem fonte de produção, então não muda.
+ * As **leis ativas** de cada facção modificam a economia do turno — renda,
+ * cultura, pesquisa, manpower, comida, energia, prosperidade, manutenção etc.
+ * (ver `loadLawModifiers`).
  */
 export async function advanceTurn(saveId: number): Promise<TurnResult> {
   await ensureSchema();
@@ -1101,6 +1126,14 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const save = await getSave(saveId);
   const provinces = await readProvinces(saveId);
   const factions = await loadFactions(saveId);
+
+  // Modificadores das leis ativas de cada facção (aplicados na economia).
+  const lawModByCode = new Map<string, LawModifiers>();
+  for (const f of factions) {
+    lawModByCode.set(f.code, await loadLawModifiers(saveId, f.code));
+  }
+  const lawOf = (code: string): LawModifiers =>
+    lawModByCode.get(code) ?? emptyLawModifiers();
 
   // Mapa de células → província, usado na manutenção, no recrutamento e na
   // recuperação dos esquadrões.
@@ -1125,6 +1158,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   for (const r of cityTroopRows) {
     const cost = Math.round(TROOP_TYPES[r.kind as TroopKind].upkeep / 2);
     upkeep.set(r.owner_code, (upkeep.get(r.owner_code) ?? 0) + cost);
+  }
+  // Leis podem baratear ou encarecer a manutenção do exército.
+  for (const [code, raw] of [...upkeep]) {
+    const m = lawOf(code).TROOP_UPKEEP_PCT;
+    if (m !== 0) upkeep.set(code, Math.round(raw * (1 + m / 100)));
   }
 
   // ===== Cidades, construções e economia =====
@@ -1155,7 +1193,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   }
   for (const [code, raw] of consUpkeepRaw) {
     const mult = ALIGNMENT_ECONOMY[alignOf(code)].upkeepMult;
-    upkeep.set(code, (upkeep.get(code) ?? 0) + Math.round(raw * mult));
+    const lawMult = 1 + lawOf(code).CONSTRUCTION_UPKEEP_PCT / 100;
+    upkeep.set(
+      code,
+      (upkeep.get(code) ?? 0) + Math.round(raw * mult * lawMult),
+    );
   }
 
   // Bônus de ganhos (Banco/Bolsa/Agência bancária) de cada facção.
@@ -1214,6 +1256,7 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   for (const c of cities) {
     const k = `${c.x},${c.y}`;
     const align = alignOf(c.ownerCode);
+    const lm = lawOf(c.ownerCode);
     const factory = FACTORY_BY_ALIGNMENT[align];
     const econ = ALIGNMENT_ECONOMY[align];
     const bonus = bonusByFaction.get(c.ownerCode) ?? {
@@ -1261,9 +1304,13 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       } else if (con.kind === 'MINA') {
         const prov = provByTile.get(`${con.x},${con.y}`);
         if (prov) {
+          // As leis podem reforçar (ou restringir) a coleta das minas.
+          const mined = Math.round(
+            mineOutput(prov.resource) * (1 + lm.MINE_PCT / 100),
+          );
           collected.set(
             prov.resource,
-            (collected.get(prov.resource) ?? 0) + mineOutput(prov.resource),
+            (collected.get(prov.resource) ?? 0) + mined,
           );
         }
       } else if (def.collects) {
@@ -1286,7 +1333,9 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
     // Coleta de recursos → estoque, respeitando os tetos (com os armazéns).
     const resourceFinal = new Map<string, number>();
     for (const [res, amt] of collected) {
-      const cap = resourceCapacity(res, armazens);
+      const cap = Math.round(
+        resourceCapacity(res, armazens) * (1 + lm.STORAGE_PCT / 100),
+      );
       const final = Math.min(cap, (inv.get(res) ?? 0) + amt);
       inv.set(res, final);
       resourceFinal.set(res, final);
@@ -1304,6 +1353,10 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
         energy += def.energyOutput;
       }
     }
+    // As leis podem reforçar ou racionar a energia gerada pelas usinas.
+    if (energy > 0 && lm.ENERGY_PCT !== 0) {
+      energy = Math.max(0, Math.round(energy * (1 + lm.ENERGY_PCT / 100)));
+    }
     // Consumidores de energia atendidos por ordem de construção.
     for (const con of cons) {
       const def = CONSTRUCTIONS[con.kind];
@@ -1314,8 +1367,10 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       }
     }
 
-    const effProduction =
-      cityProduction(c) + factories * factory.productivity;
+    const effProduction = Math.round(
+      (cityProduction(c) + factories * factory.productivity) *
+        (1 + lm.PRODUCTION_PCT / 100),
+    );
     const foodCapacity = cityFoodCapacity(c, granaries);
     const tax = clampTax(
       factionByCode.get(c.ownerCode)?.taxLevel ?? 'MEDIO',
@@ -1326,25 +1381,34 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       factionByCode.get(c.ownerCode)?.prosperity ?? 40,
     );
     const moneyGain =
-      Math.round(cityTaxIncome(c.population, tax, align) * prosMult) +
       Math.round(
-        factories * factory.money * econ.industrialMult * (1 + bonus.industrial),
+        cityTaxIncome(c.population, tax, align) *
+          prosMult *
+          (1 + lm.TAX_PCT / 100),
+      ) +
+      Math.round(
+        factories *
+          factory.money *
+          econ.industrialMult *
+          (1 + bonus.industrial) *
+          (1 + lm.FACTORY_PCT / 100),
       ) +
       Math.round(
         commercialMoney *
           econ.commercialMult *
           (1 + bonus.commercial) *
-          prosMult,
+          prosMult *
+          (1 + lm.COMMERCIAL_PCT / 100),
       );
 
     cityCalc.set(k, {
       effProduction,
-      foodProduction,
+      foodProduction: Math.round(foodProduction * (1 + lm.FOOD_PCT / 100)),
       foodCapacity,
       moneyGain,
-      cultureGain,
-      researchGain,
-      happiness: cityHappiness(tax, happinessBonus),
+      cultureGain: Math.round(cultureGain * (1 + lm.CULTURE_PCT / 100)),
+      researchGain: Math.round(researchGain * (1 + lm.RESEARCH_PCT / 100)),
+      happiness: cityHappiness(tax, happinessBonus + lm.HAPPINESS_FLAT),
       popCapBonus,
       resourceFinal,
     });
@@ -1494,6 +1558,7 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
   const cityResearchGain = new Map<string, number>();
   for (const c of cities) {
     const calc = cityCalc.get(`${c.x},${c.y}`)!;
+    const lm = lawOf(c.ownerCode);
     cityMoneyGain.set(
       c.ownerCode,
       (cityMoneyGain.get(c.ownerCode) ?? 0) + calc.moneyGain,
@@ -1525,7 +1590,11 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       // felicidade amplia (ou reduz) esse crescimento.
       const surplus = prod - cons;
       if (surplus > 0) {
-        const growth = population * (surplus / 100) * (1 + happMod);
+        const growth =
+          population *
+          (surplus / 100) *
+          (1 + happMod) *
+          (1 + lm.POP_GROWTH_PCT / 100);
         population = Math.round(population + growth);
       }
     } else {
@@ -1535,8 +1604,14 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       const loss = population * STARVATION_LOSS * (1 - happMod);
       population = Math.max(0, Math.round(population - loss));
     }
-    // A população não cresce além do teto da cidade (+ conjuntos/áreas urbanas).
-    population = Math.min(cityPopCap(c) + calc.popCapBonus, population);
+    // A população não cresce além do teto da cidade (+ conjuntos/áreas urbanas
+    // e os modificadores de teto das leis).
+    population = Math.min(
+      Math.round(
+        (cityPopCap(c) + calc.popCapBonus) * (1 + lm.POP_CAP_PCT / 100),
+      ),
+      population,
+    );
     // Manpower é uma catraca: 1% da população, e só sobe quando ela cresce.
     let manpowerCap = c.manpowerCap;
     const newCap = cityManpower(population);
@@ -1623,36 +1698,57 @@ export async function advanceTurn(saveId: number): Promise<TurnResult> {
       p = Math.max(cap, p - PROSPERITY_DECAY);
     } else {
       const growth =
-        PROSPERITY_BASE_GROWTH * prosperityGrowthMult(tax) * (1 + consBonus);
+        PROSPERITY_BASE_GROWTH * prosperityGrowthMult(tax) * (1 + consBonus) +
+        lawOf(f.code).PROSPERITY_GROWTH_FLAT;
       p = Math.min(cap, Math.max(PROSPERITY_MIN, p + growth));
     }
     prosperityNext.set(f.code, p);
+  }
+
+  // População total de cada facção — base do custo da Lei de Seguridade Social.
+  const factionPop = new Map<string, number>();
+  for (const c of cities) {
+    factionPop.set(
+      c.ownerCode,
+      (factionPop.get(c.ownerCode) ?? 0) + c.population,
+    );
   }
 
   const turn = save.turn + 1;
   await db.execute('BEGIN');
   try {
     for (const f of factions) {
+      const lm = lawOf(f.code);
       const up = upkeep.get(f.code) ?? 0;
-      const mpGain = cityManpowerGain.get(f.code) ?? 0;
-      const income = cityMoneyGain.get(f.code) ?? 0;
+      // Manpower vem do crescimento das cidades, ajustado pelas leis.
+      const mpGain = Math.round(
+        (cityManpowerGain.get(f.code) ?? 0) * (1 + lm.MANPOWER_PCT / 100),
+      );
+      // Custo por turno da seguridade social — cresce com a população.
+      const welfare = Math.round(
+        (lm.WELFARE_PER_100K * (factionPop.get(f.code) ?? 0)) / 100_000,
+      );
+      // Renda das cidades + dinheiro fixo das leis (e o custo da seguridade).
+      const income =
+        (cityMoneyGain.get(f.code) ?? 0) + lm.MONEY_FLAT + welfare;
       const cultureGain = cityCultureGain.get(f.code) ?? 0;
       const researchGain = cityResearchGain.get(f.code) ?? 0;
       // Cultura e pesquisa vêm das cidades (base + construções).
       f.culture += cultureGain;
       f.researchPoints += researchGain;
-      // Manpower vem do crescimento das cidades (1% da nova população).
       f.manpower += mpGain;
-      // Renda das cidades (imposto + fábricas) menos a manutenção; o dinheiro
-      // não pode ficar negativo.
+      // A influência vem das leis (ex.: Lei do Corpo Diplomático).
+      f.influence += lm.INFLUENCE_FLAT;
+      // Renda das cidades menos a manutenção; o dinheiro não fica negativo.
       f.money = Math.max(0, f.money + income - up);
       f.prosperity = prosperityNext.get(f.code) ?? f.prosperity;
       await db.execute(
-        `UPDATE factions SET money = ?, manpower = ?, research_points = ?,
-           culture = ?, prosperity = ?
+        `UPDATE factions SET money = ?, influence = ?, manpower = ?,
+           research_points = ?, culture = ?, prosperity = ?
          WHERE save_id = ? AND code = ?`,
         [
           f.money,
+          f.influence,
           f.manpower,
           f.researchPoints,
           f.culture,

@@ -14,6 +14,7 @@ import { getDb } from '../db';
 import { COLONO_COST, destroySettlerSquadsAt } from './cities';
 import { cityHasConstruction } from './constructions';
 import { roadMoveAllowance } from './roads';
+import { loadLawModifiers } from './laws';
 
 /** Custo, em dinheiro, para montar um esquadrão. */
 export const SQUAD_COST = 500;
@@ -469,6 +470,9 @@ export async function createSquad(
     stars = r < 0.02 ? 4 : r < 0.12 ? 3 : 2;
     xp = ACADEMY_COMMANDER_XP;
   }
+  // As leis (ex.: Meritocracia Militar) ajustam a experiência inicial.
+  const lawMods = await loadLawModifiers(saveId, ownerCode);
+  xp = Math.max(0, xp + lawMods.COMMANDER_XP_FLAT);
   await db.execute('BEGIN');
   try {
     await db.execute(
@@ -530,14 +534,19 @@ export async function moveSquad(
     'SELECT save_id, owner_code FROM squads WHERE id = ?',
     [squadId],
   );
-  // A via do tile de destino define quantos tiles cabem no turno.
+  // A via do tile de destino define quantos tiles cabem no turno; as leis
+  // (ex.: Prioridade Militar nas Estradas, Pedágios Internos) ajustam isso.
   let allowance = 1;
   if (info[0]) {
     const prov = await db.select<{ road: string | null }[]>(
       'SELECT road FROM provinces WHERE save_id = ? AND x = ? AND y = ?',
       [info[0].save_id, x, y],
     );
-    allowance = roadMoveAllowance(prov[0]?.road ?? null);
+    const lm = await loadLawModifiers(info[0].save_id, info[0].owner_code);
+    allowance = Math.max(
+      1,
+      roadMoveAllowance(prov[0]?.road ?? null) + lm.MOVEMENT_FLAT,
+    );
   }
   await db.execute(
     `UPDATE squads
@@ -630,6 +639,7 @@ interface RecruitRow {
   kind: string;
   prod_cost: number;
   prod_done: number;
+  money_cost: number;
 }
 
 /** Carrega as ordens de recrutamento de uma partida (em ordem de fila). */
@@ -665,6 +675,9 @@ export async function queueRecruit(
   kind: RecruitKind,
 ): Promise<void> {
   const db = await getDb();
+  // As leis ajustam o custo do recrutamento (dinheiro das tropas, produção
+  // dos colonos).
+  const lm = await loadLawModifiers(saveId, ownerCode);
 
   // O colono é pago com a **população** e a **comida** da própria cidade.
   if (kind === 'COLONO') {
@@ -689,6 +702,11 @@ export async function queueRecruit(
     if (city.food < COLONO_COST.food) {
       throw new Error(`Comida insuficiente para um colono (${COLONO_COST.food}).`);
     }
+    // Leis (ex.: Colonização Acelerada) baratearam a produção do colono.
+    const colonoProd = Math.max(
+      1,
+      Math.round(COLONO_COST.production * (1 + lm.COLONO_PCT / 100)),
+    );
     await db.execute('BEGIN');
     try {
       await db.execute(
@@ -699,7 +717,7 @@ export async function queueRecruit(
         `INSERT INTO recruit_orders
            (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done)
          VALUES (?, ?, ?, ?, 0, 'COLONO', ?, 0)`,
-        [saveId, x, y, ownerCode, COLONO_COST.production],
+        [saveId, x, y, ownerCode, colonoProd],
       );
       await db.execute('COMMIT');
     } catch (e) {
@@ -711,13 +729,19 @@ export async function queueRecruit(
 
   const troop = TROOP_TYPES[kind];
 
+  // Custo em dinheiro já com o ajuste das leis (ex.: Mobilização Rápida).
+  const moneyCost = Math.max(
+    0,
+    Math.round(troop.moneyCost * (1 + lm.RECRUIT_MONEY_PCT / 100)),
+  );
+
   const rows = await db.select<{ money: number; manpower: number }[]>(
     'SELECT money, manpower FROM factions WHERE save_id = ? AND code = ?',
     [saveId, ownerCode],
   );
   const f = rows[0];
-  if (!f || f.money < troop.moneyCost) {
-    throw new Error(`Dinheiro insuficiente (${troop.moneyCost}).`);
+  if (!f || f.money < moneyCost) {
+    throw new Error(`Dinheiro insuficiente (${moneyCost}).`);
   }
   if (f.manpower < troop.manpowerCost) {
     throw new Error(`Manpower insuficiente (${troop.manpowerCost}).`);
@@ -734,14 +758,15 @@ export async function queueRecruit(
     await db.execute(
       `UPDATE factions SET money = money - ?, manpower = manpower - ?
        WHERE save_id = ? AND code = ?`,
-      [troop.moneyCost, troop.manpowerCost, saveId, ownerCode],
+      [moneyCost, troop.manpowerCost, saveId, ownerCode],
     );
     // `squad_id` é coluna legada (a tropa vai para o inventário da cidade).
     await db.execute(
       `INSERT INTO recruit_orders
-         (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done)
-       VALUES (?, ?, ?, ?, 0, ?, ?, 0)`,
-      [saveId, x, y, ownerCode, kind, prodCost],
+         (save_id, x, y, owner_code, squad_id, kind, prod_cost, prod_done,
+          money_cost)
+       VALUES (?, ?, ?, ?, 0, ?, ?, 0, ?)`,
+      [saveId, x, y, ownerCode, kind, prodCost, moneyCost],
     );
     await db.execute('COMMIT');
   } catch (e) {
@@ -772,10 +797,13 @@ export async function cancelRecruit(orderId: number): Promise<void> {
       );
     } else {
       const troop = TROOP_TYPES[o.kind as TroopKind];
+      // Devolve o dinheiro de fato pago (com o desconto das leis na hora do
+      // recrutamento). Ordens anteriores à coluna `money_cost` usam o cheio.
+      const moneyRefund = o.money_cost > 0 ? o.money_cost : troop.moneyCost;
       await db.execute(
         `UPDATE factions SET money = money + ?, manpower = manpower + ?
          WHERE save_id = ? AND code = ?`,
-        [troop.moneyCost, troop.manpowerCost, o.save_id, o.owner_code],
+        [moneyRefund, troop.manpowerCost, o.save_id, o.owner_code],
       );
     }
     await db.execute('DELETE FROM recruit_orders WHERE id = ?', [orderId]);

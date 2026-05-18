@@ -21,16 +21,18 @@
  * custo, sorteio e validações. A UI nunca envia custo, carta sorteada nem
  * resultado — só dispara a ação.
  *
- * PRINCÍPIO DO CATÁLOGO: cada card é uma **lei/decreto** que um governo aprova
- * — nunca uma consequência ou um estado de coisas. O efeito é o que a lei
- * *causa*. São **90 leis** (30 boas, 30 neutras, 30 ruins); onze são "leis
- * engraçadas" inspiradas em leis reais, mas o texto de cada card é sempre
- * **deste mundo** — nada de referência histórica ao mundo real. Os efeitos
- * ainda são **descritivos** — o sistema numérico que os aplica na
- * economia/combate virá depois. Ver `GAME_DESIGN.md`.
+ * EFEITOS: cada lei traz **efeitos estruturados** (`LawEffect` — `kind` +
+ * `value`). `loadLawModifiers` soma os efeitos das leis ativas de uma facção
+ * num `LawModifiers`, que o `advanceTurn` aplica na economia do turno. O texto
+ * exibido no card é **gerado** a partir do efeito (ver `lawEffectLine`).
+ * Os efeitos de **combate** e de **custo por ação** ainda serão ligados.
+ *
+ * São 90 leis (30 boas, 30 neutras, 30 ruins). Onze são "leis engraçadas"
+ * inspiradas em leis reais, mas o texto é sempre deste mundo. Ver `GAME_DESIGN.md`.
  */
 
 import { getDb } from '../db';
+import { CUSTOM_NATION_CODE } from './nations';
 import type Database from '@tauri-apps/plugin-sql';
 
 // ===== Qualidade das leis =====
@@ -80,17 +82,214 @@ export const LAW_QUALITY_LIST: LawQualityInfo[] = [
   LAW_QUALITIES.RUIM,
 ];
 
-// ===== Catálogo de leis =====
+// ===== Efeitos das leis =====
 
 /**
- * Uma linha de efeito de uma lei — texto exibido no card. `good` controla só a
- * cor (verde = buff, vermelho = debuff). O sistema numérico que de fato aplica
- * o efeito virá com a integração das leis à economia/combate.
+ * O que um efeito de lei modifica. `*_PCT` são modificadores percentuais
+ * (somados entre leis: +25 e −15 = +10%); `*_FLAT` são valores absolutos.
  */
+export type LawEffectKind =
+  | 'TAX_PCT'
+  | 'COMMERCIAL_PCT'
+  | 'FACTORY_PCT'
+  | 'PRODUCTION_PCT'
+  | 'FOOD_PCT'
+  | 'CULTURE_PCT'
+  | 'RESEARCH_PCT'
+  | 'MANPOWER_PCT'
+  | 'ENERGY_PCT'
+  | 'MINE_PCT'
+  | 'STORAGE_PCT'
+  | 'POP_CAP_PCT'
+  | 'POP_GROWTH_PCT'
+  | 'ATTACK_PCT'
+  | 'DEFENSE_PCT'
+  | 'CONSTRUCTION_MONEY_PCT'
+  | 'CONSTRUCTION_PROD_PCT'
+  | 'CONSTRUCTION_UPKEEP_PCT'
+  | 'TROOP_UPKEEP_PCT'
+  | 'RECRUIT_MONEY_PCT'
+  | 'COLONO_PCT'
+  | 'HAPPINESS_FLAT'
+  | 'INFLUENCE_FLAT'
+  | 'MONEY_FLAT'
+  | 'COMMANDER_XP_FLAT'
+  | 'MOVEMENT_FLAT'
+  | 'PROSPERITY_GROWTH_FLAT'
+  | 'WELFARE_PER_100K';
+
+/** Um efeito de uma lei — `value` é o modificador, com sinal. */
+export interface LawEffect {
+  kind: LawEffectKind;
+  value: number;
+}
+
+/** Linha de efeito pronta para exibir num card (texto + cor). */
 export interface LawEffectLine {
   text: string;
   good: boolean;
 }
+
+function pctText(v: number, suffix: string): string {
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v)}% ${suffix}`;
+}
+function flatText(v: number, suffix: string): string {
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v)} ${suffix}`;
+}
+function moneyText(v: number): string {
+  const n = String(Math.abs(v)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return `${v >= 0 ? '+' : '−'}${n}`;
+}
+function decimalText(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${String(Math.abs(v)).replace('.', ',')}`;
+}
+
+/**
+ * Catálogo dos tipos de efeito: como cada um é descrito no card e se um valor
+ * **positivo** é um buff (a maioria) ou um debuff (os custos — onde reduzir é
+ * que é bom).
+ */
+export const LAW_EFFECT_KINDS: Record<
+  LawEffectKind,
+  { describe: (value: number) => string; positiveIsGood: boolean }
+> = {
+  TAX_PCT: {
+    describe: (v) => pctText(v, 'de renda de impostos'),
+    positiveIsGood: true,
+  },
+  COMMERCIAL_PCT: {
+    describe: (v) => pctText(v, 'de renda das zonas comerciais'),
+    positiveIsGood: true,
+  },
+  FACTORY_PCT: {
+    describe: (v) => pctText(v, 'de renda das zonas de fábrica'),
+    positiveIsGood: true,
+  },
+  PRODUCTION_PCT: {
+    describe: (v) => pctText(v, 'de produção das cidades'),
+    positiveIsGood: true,
+  },
+  FOOD_PCT: {
+    describe: (v) => pctText(v, 'de produção de comida'),
+    positiveIsGood: true,
+  },
+  CULTURE_PCT: {
+    describe: (v) => pctText(v, 'de cultura por turno'),
+    positiveIsGood: true,
+  },
+  RESEARCH_PCT: {
+    describe: (v) => pctText(v, 'de pesquisa por turno'),
+    positiveIsGood: true,
+  },
+  MANPOWER_PCT: {
+    describe: (v) => pctText(v, 'de manpower gerado pelas cidades'),
+    positiveIsGood: true,
+  },
+  ENERGY_PCT: {
+    describe: (v) => pctText(v, 'de energia gerada pelas usinas'),
+    positiveIsGood: true,
+  },
+  MINE_PCT: {
+    describe: (v) => pctText(v, 'na coleta de recursos das minas'),
+    positiveIsGood: true,
+  },
+  STORAGE_PCT: {
+    describe: (v) => pctText(v, 'na capacidade de estoque das cidades'),
+    positiveIsGood: true,
+  },
+  POP_CAP_PCT: {
+    describe: (v) => pctText(v, 'no teto de população das cidades'),
+    positiveIsGood: true,
+  },
+  POP_GROWTH_PCT: {
+    describe: (v) => pctText(v, 'no crescimento populacional'),
+    positiveIsGood: true,
+  },
+  ATTACK_PCT: {
+    describe: (v) => pctText(v, 'de força das tropas em ataques'),
+    positiveIsGood: true,
+  },
+  DEFENSE_PCT: {
+    describe: (v) => pctText(v, 'de força de defesa das cidades'),
+    positiveIsGood: true,
+  },
+  CONSTRUCTION_MONEY_PCT: {
+    describe: (v) => pctText(v, 'no custo em dinheiro das construções'),
+    positiveIsGood: false,
+  },
+  CONSTRUCTION_PROD_PCT: {
+    describe: (v) => pctText(v, 'no custo de produção das construções'),
+    positiveIsGood: false,
+  },
+  CONSTRUCTION_UPKEEP_PCT: {
+    describe: (v) => pctText(v, 'de manutenção das construções'),
+    positiveIsGood: false,
+  },
+  TROOP_UPKEEP_PCT: {
+    describe: (v) => pctText(v, 'de manutenção das tropas'),
+    positiveIsGood: false,
+  },
+  RECRUIT_MONEY_PCT: {
+    describe: (v) =>
+      pctText(v, 'no custo em dinheiro do recrutamento de tropas'),
+    positiveIsGood: false,
+  },
+  COLONO_PCT: {
+    describe: (v) => pctText(v, 'no custo de colonos'),
+    positiveIsGood: false,
+  },
+  HAPPINESS_FLAT: {
+    describe: (v) => flatText(v, 'de felicidade'),
+    positiveIsGood: true,
+  },
+  INFLUENCE_FLAT: {
+    describe: (v) => flatText(v, 'de influência por turno'),
+    positiveIsGood: true,
+  },
+  MONEY_FLAT: {
+    describe: (v) => `${moneyText(v)} de dinheiro por turno`,
+    positiveIsGood: true,
+  },
+  COMMANDER_XP_FLAT: {
+    describe: (v) => `Comandantes nascem com ${flatText(v, 'de experiência')}`,
+    positiveIsGood: true,
+  },
+  MOVEMENT_FLAT: {
+    describe: (v) => flatText(v, 'de movimento por turno para as tropas'),
+    positiveIsGood: true,
+  },
+  PROSPERITY_GROWTH_FLAT: {
+    describe: (v) =>
+      `${decimalText(v)} por turno no crescimento de prosperidade`,
+    positiveIsGood: true,
+  },
+  WELFARE_PER_100K: {
+    describe: (v) =>
+      `${moneyText(v)} de dinheiro por turno a cada 100 mil habitantes da nação`,
+    positiveIsGood: true,
+  },
+};
+
+/** Todos os tipos de efeito, em lista. */
+export const LAW_EFFECT_KIND_LIST = Object.keys(
+  LAW_EFFECT_KINDS,
+) as LawEffectKind[];
+
+/** Monta a linha exibível (texto + cor) de um efeito. */
+export function lawEffectLine(effect: LawEffect): LawEffectLine {
+  const info = LAW_EFFECT_KINDS[effect.kind];
+  return {
+    text: info.describe(effect.value),
+    good: info.positiveIsGood ? effect.value > 0 : effect.value < 0,
+  };
+}
+
+/** As linhas exibíveis de todos os efeitos de uma carta. */
+export function lawEffectLines(card: LawCard): LawEffectLine[] {
+  return card.effects.map(lawEffectLine);
+}
+
+// ===== Catálogo de leis =====
 
 /** Identificador de uma lei do catálogo. */
 export type LawId =
@@ -198,14 +397,13 @@ export interface LawCard {
   icon: string;
   /** Texto de ambientação da lei — sempre deste mundo, sem referência real. */
   flavor: string;
-  /** Efeitos da lei exibidos no card (buffs e debuffs). */
-  effects: LawEffectLine[];
+  /** Efeitos estruturados da lei (buffs e debuffs). */
+  effects: LawEffect[];
 }
 
 /**
  * Catálogo de leis. São 90 cards — 30 boas, 30 neutras e 30 ruins. Todo card é
  * uma lei/decreto que um governo aprova; o efeito é a consequência da lei.
- * Os efeitos são descritivos por enquanto.
  */
 export const LAW_CARDS: Record<LawId, LawCard> = {
   // ===== Boas =====
@@ -217,7 +415,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🧾',
     flavor:
       'Moderniza e simplifica a arrecadação, ampliando a base de quem paga sem aumentar a alíquota.',
-    effects: [{ text: '+12% de renda de impostos', good: true }],
+    effects: [{ kind: 'TAX_PCT', value: 12 }],
   },
   ZONA_LIVRE_COMERCIO: {
     id: 'ZONA_LIVRE_COMERCIO',
@@ -227,7 +425,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🏷️',
     flavor:
       'Cria distritos onde mercadorias entram e saem sem tarifa nem inspeção; o capital estrangeiro acorre em massa.',
-    effects: [{ text: '+30% de renda das zonas comerciais', good: true }],
+    effects: [{ kind: 'COMMERCIAL_PCT', value: 30 }],
   },
   SERVICO_MILITAR: {
     id: 'SERVICO_MILITAR',
@@ -237,7 +435,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🎖️',
     flavor:
       'Torna o alistamento obrigatório; o exército nunca fica sem reservas para mobilizar.',
-    effects: [{ text: '+20% de manpower gerado pelas cidades', good: true }],
+    effects: [{ kind: 'MANPOWER_PCT', value: 20 }],
   },
   INCENTIVO_CULTURA: {
     id: 'INCENTIVO_CULTURA',
@@ -248,8 +446,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Financia artistas, festivais e grandes obras — e inaugura uma verdadeira idade de ouro.',
     effects: [
-      { text: '+30% de cultura por turno', good: true },
-      { text: '+5 de felicidade', good: true },
+      { kind: 'CULTURE_PCT', value: 30 },
+      { kind: 'HAPPINESS_FLAT', value: 5 },
     ],
   },
   SUBSIDIO_INDUSTRIAL: {
@@ -260,7 +458,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🏭',
     flavor:
       'O Estado banca crédito e energia barata para as fábricas, que passam a girar dia e noite.',
-    effects: [{ text: '+15% de renda das zonas de fábrica', good: true }],
+    effects: [{ kind: 'FACTORY_PCT', value: 15 }],
   },
   OBRAS_PUBLICAS: {
     id: 'OBRAS_PUBLICAS',
@@ -270,9 +468,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🏗️',
     flavor:
       'Mobiliza o país num mutirão de estradas, portos e usinas erguidos a preço de Estado.',
-    effects: [
-      { text: '−25% no custo em dinheiro das construções', good: true },
-    ],
+    effects: [{ kind: 'CONSTRUCTION_MONEY_PCT', value: -25 }],
   },
   REFORMA_EDUCACIONAL: {
     id: 'REFORMA_EDUCACIONAL',
@@ -282,7 +478,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🎓',
     flavor:
       'Coloca escolas e universidades como prioridade nacional — uma geração inteira de cientistas.',
-    effects: [{ text: '+30% de pesquisa por turno', good: true }],
+    effects: [{ kind: 'RESEARCH_PCT', value: 30 }],
   },
   SUBSIDIO_AGRICOLA: {
     id: 'SUBSIDIO_AGRICOLA',
@@ -292,7 +488,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🌾',
     flavor:
       'O Estado garante preço mínimo e crédito ao campo; a colheita cresce e a fome recua.',
-    effects: [{ text: '+18% de produção de comida', good: true }],
+    effects: [{ kind: 'FOOD_PCT', value: 18 }],
   },
   PROIBICAO_CHICLETE: {
     id: 'PROIBICAO_CHICLETE',
@@ -303,8 +499,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Vender goma de mascar passa a ser crime: as calçadas ficam impecáveis e as cidades viram vitrines que atraem comércio e turismo.',
     effects: [
-      { text: '+10% de renda das zonas comerciais', good: true },
-      { text: '+6 de felicidade', good: true },
+      { kind: 'COMMERCIAL_PCT', value: 10 },
+      { kind: 'HAPPINESS_FLAT', value: 6 },
     ],
   },
   SORRISO_OBRIGATORIO: {
@@ -315,7 +511,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '😊',
     flavor:
       'Andar de cara fechada em via pública vira contravenção — todo cidadão exibe um sorriso, salvo em funerais e hospitais.',
-    effects: [{ text: '+15 de felicidade', good: true }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: 15 }],
   },
   CORPO_DIPLOMATICO: {
     id: 'CORPO_DIPLOMATICO',
@@ -325,7 +521,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📨',
     flavor:
       'Cria um quadro permanente de embaixadores que mantêm a voz da nação ativa em todas as cortes.',
-    effects: [{ text: '+8 de influência por turno', good: true }],
+    effects: [{ kind: 'INFLUENCE_FLAT', value: 8 }],
   },
   MERCADO_INTERNO: {
     id: 'MERCADO_INTERNO',
@@ -335,9 +531,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📊',
     flavor:
       'Protege e estimula o consumo doméstico; a economia ganha um chão firme para crescer.',
-    effects: [
-      { text: '+0,15 por turno no crescimento de prosperidade', good: true },
-    ],
+    effects: [{ kind: 'PROSPERITY_GROWTH_FLAT', value: 0.15 }],
   },
   EFICIENCIA_ADMIN: {
     id: 'EFICIENCIA_ADMIN',
@@ -347,7 +541,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📐',
     flavor:
       'Enxuga o funcionalismo e padroniza a gestão: manter os edifícios públicos custa muito menos.',
-    effects: [{ text: '−20% de manutenção das construções', good: true }],
+    effects: [{ kind: 'CONSTRUCTION_UPKEEP_PCT', value: -20 }],
   },
   PADRONIZACAO_OBRAS: {
     id: 'PADRONIZACAO_OBRAS',
@@ -357,9 +551,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🧱',
     flavor:
       'Plantas e materiais únicos para todo o território: cada obra avança com menos desperdício.',
-    effects: [
-      { text: '−15% no custo de produção das construções', good: true },
-    ],
+    effects: [{ kind: 'CONSTRUCTION_PROD_PCT', value: -15 }],
   },
   MOBILIZACAO_RAPIDA: {
     id: 'MOBILIZACAO_RAPIDA',
@@ -369,9 +561,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📯',
     flavor:
       'Cria centros de alistamento ágeis em cada cidade; equipar um recruta sai bem mais barato.',
-    effects: [
-      { text: '−20% no custo em dinheiro do recrutamento de tropas', good: true },
-    ],
+    effects: [{ kind: 'RECRUIT_MONEY_PCT', value: -20 }],
   },
   ORCAMENTO_DEFESA: {
     id: 'ORCAMENTO_DEFESA',
@@ -381,7 +571,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🎗️',
     flavor:
       'Reorganiza o soldo e a logística do exército; manter as tropas pesa menos no tesouro.',
-    effects: [{ text: '−20% de manutenção das tropas', good: true }],
+    effects: [{ kind: 'TROOP_UPKEEP_PCT', value: -20 }],
   },
   MERITOCRACIA_MILITAR: {
     id: 'MERITOCRACIA_MILITAR',
@@ -391,9 +581,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🥇',
     flavor:
       'Promove oficiais por desempenho em campo; cada novo comandante já chega calejado.',
-    effects: [
-      { text: 'Comandantes nascem com +15 de experiência', good: true },
-    ],
+    effects: [{ kind: 'COMMANDER_XP_FLAT', value: 15 }],
   },
   DOUTRINA_OFENSIVA: {
     id: 'DOUTRINA_OFENSIVA',
@@ -403,7 +591,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🗡️',
     flavor:
       'Treina o exército para o avanço e o assalto; as tropas golpeiam com fúria redobrada.',
-    effects: [{ text: '+25% de força das tropas em ataques', good: true }],
+    effects: [{ kind: 'ATTACK_PCT', value: 25 }],
   },
   PRIORIDADE_ESTRADAS: {
     id: 'PRIORIDADE_ESTRADAS',
@@ -413,9 +601,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🛣️',
     flavor:
       'Reserva as estradas para o trânsito do exército; as colunas cruzam o país num passo.',
-    effects: [
-      { text: '+1 de movimento por turno para as tropas', good: true },
-    ],
+    effects: [{ kind: 'MOVEMENT_FLAT', value: 1 }],
   },
   PROGRAMA_ENERGETICO: {
     id: 'PROGRAMA_ENERGETICO',
@@ -425,7 +611,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🔌',
     flavor:
       'Investe pesado em geração e na rede elétrica; as usinas rendem como nunca.',
-    effects: [{ text: '+25% de energia gerada pelas usinas', good: true }],
+    effects: [{ kind: 'ENERGY_PCT', value: 25 }],
   },
   EXPANSAO_URBANA: {
     id: 'EXPANSAO_URBANA',
@@ -435,7 +621,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🏙️',
     flavor:
       'Libera o zoneamento e ergue novos bairros; as cidades comportam muito mais gente.',
-    effects: [{ text: '+15% no teto de população das cidades', good: true }],
+    effects: [{ kind: 'POP_CAP_PCT', value: 15 }],
   },
   INCENTIVO_NATALIDADE: {
     id: 'INCENTIVO_NATALIDADE',
@@ -445,7 +631,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '👶',
     flavor:
       'Concede auxílios e licenças generosas às famílias; os berçários não dão conta.',
-    effects: [{ text: '+20% no crescimento populacional', good: true }],
+    effects: [{ kind: 'POP_GROWTH_PCT', value: 20 }],
   },
   EXPLORACAO_MINERAL: {
     id: 'EXPLORACAO_MINERAL',
@@ -455,7 +641,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '⛏️',
     flavor:
       'Abre o subsolo à exploração intensiva; as minas entregam mais a cada turno.',
-    effects: [{ text: '+20% na coleta de recursos das minas', good: true }],
+    effects: [{ kind: 'MINE_PCT', value: 20 }],
   },
   ARMAZENS_PUBLICOS: {
     id: 'ARMAZENS_PUBLICOS',
@@ -465,9 +651,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📦',
     flavor:
       'Ergue silos e depósitos estatais em cada cidade; nada mais transborda e se perde.',
-    effects: [
-      { text: '+25% na capacidade de estoque das cidades', good: true },
-    ],
+    effects: [{ kind: 'STORAGE_PCT', value: 25 }],
   },
   VALORIZACAO_ARTES: {
     id: 'VALORIZACAO_ARTES',
@@ -477,7 +661,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🎭',
     flavor:
       'Garante pensão e prestígio a artistas e mestres de ofício; a vida cultural floresce.',
-    effects: [{ text: '+15% de cultura por turno', good: true }],
+    effects: [{ kind: 'CULTURE_PCT', value: 15 }],
   },
   COMBATE_SONEGACAO: {
     id: 'COMBATE_SONEGACAO',
@@ -487,7 +671,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🧮',
     flavor:
       'Cria uma fiscalização implacável; quem devia ao Estado agora paga em dia.',
-    effects: [{ text: '+25% de renda de impostos', good: true }],
+    effects: [{ kind: 'TAX_PCT', value: 25 }],
   },
   CONCESSOES_PUBLICAS: {
     id: 'CONCESSOES_PUBLICAS',
@@ -497,7 +681,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '💰',
     flavor:
       'Arrenda portos, estradas e terras da Coroa à iniciativa privada; o tesouro recebe um fluxo fixo.',
-    effects: [{ text: '+1.200 de dinheiro por turno', good: true }],
+    effects: [{ kind: 'MONEY_FLAT', value: 1200 }],
   },
   SEGURANCA_ALIMENTAR: {
     id: 'SEGURANCA_ALIMENTAR',
@@ -508,8 +692,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Garante o prato cheio como direito; os celeiros transbordam e a fome vira lembrança.',
     effects: [
-      { text: '+25% de produção de comida', good: true },
-      { text: '+4 de felicidade', good: true },
+      { kind: 'FOOD_PCT', value: 25 },
+      { kind: 'HAPPINESS_FLAT', value: 4 },
     ],
   },
   SESTA_OBRIGATORIA: {
@@ -520,7 +704,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '😴',
     flavor:
       'Ao meio da tarde a nação inteira para: o cochilo é obrigatório por decreto, e o povo acorda de bom humor.',
-    effects: [{ text: '+12 de felicidade', good: true }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: 12 }],
   },
   ABRIGO_EM_CADA_LAR: {
     id: 'ABRIGO_EM_CADA_LAR',
@@ -530,7 +714,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🛖',
     flavor:
       'Nenhuma casa pode ser erguida sem um abrigo subterrâneo; a população dorme entrincheirada atrás das próprias paredes.',
-    effects: [{ text: '+18% de força de defesa das cidades', good: true }],
+    effects: [{ kind: 'DEFENSE_PCT', value: 18 }],
   },
 
   // ===== Neutras =====
@@ -543,8 +727,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Renuncia oficialmente à guerra de conquista: o exército é barato e treinado só para resistir.',
     effects: [
-      { text: '−50% de manutenção das tropas', good: true },
-      { text: '−30% de força das tropas em ataques', good: false },
+      { kind: 'TROOP_UPKEEP_PCT', value: -50 },
+      { kind: 'ATTACK_PCT', value: -30 },
     ],
   },
   PLANO_QUINQUENAL: {
@@ -556,8 +740,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'O Estado fixa metas de produção para cada fábrica — eficiente nas linhas de montagem, fraco no caixa.',
     effects: [
-      { text: '+25% de produção das cidades', good: true },
-      { text: '−15% de renda de impostos', good: false },
+      { kind: 'PRODUCTION_PCT', value: 25 },
+      { kind: 'TAX_PCT', value: -15 },
     ],
   },
   FRONTEIRAS_ABERTAS: {
@@ -569,8 +753,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Abre o país a mercadorias e imigrantes sem barreiras — e a tensão social entra junto.',
     effects: [
-      { text: '+18% de renda das zonas comerciais', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'COMMERCIAL_PCT', value: 18 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   ESTADO_LAICO: {
@@ -582,8 +766,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Separa de vez a religião do Estado: a ciência avança livre, mas os fiéis se sentem traídos.',
     effects: [
-      { text: '+12% de pesquisa por turno', good: true },
-      { text: '−8 de felicidade', good: false },
+      { kind: 'RESEARCH_PCT', value: 12 },
+      { kind: 'HAPPINESS_FLAT', value: -8 },
     ],
   },
   CENSURA_IMPRENSA: {
@@ -595,8 +779,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'O regime controla o noticiário — o povo só ouve boas notícias, e a arte e o debate definham.',
     effects: [
-      { text: '+12 de felicidade', good: true },
-      { text: '−25% de cultura por turno', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 12 },
+      { kind: 'CULTURE_PCT', value: -25 },
     ],
   },
   PROTECIONISMO: {
@@ -608,8 +792,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Ergue tarifas altas: blinda a indústria nacional e afasta o comércio externo.',
     effects: [
-      { text: '+22% de renda das zonas de fábrica', good: true },
-      { text: '−22% de renda das zonas comerciais', good: false },
+      { kind: 'FACTORY_PCT', value: 22 },
+      { kind: 'COMMERCIAL_PCT', value: -22 },
     ],
   },
   LEI_MARCIAL: {
@@ -621,8 +805,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Coloca o exército no comando das ruas — a nação vira fortaleza, mas a economia civil congela.',
     effects: [
-      { text: '+25% de força de defesa das cidades', good: true },
-      { text: '−15% de renda de impostos', good: false },
+      { kind: 'DEFENSE_PCT', value: 25 },
+      { kind: 'TAX_PCT', value: -15 },
     ],
   },
   SEGURIDADE_SOCIAL: {
@@ -634,11 +818,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Garante saúde, aposentadoria e auxílios a todos — o povo agradece, e o tesouro sente o peso a cada novo habitante.',
     effects: [
-      { text: '+14 de felicidade', good: true },
-      {
-        text: '−200 de dinheiro por turno a cada 100 mil habitantes da nação',
-        good: false,
-      },
+      { kind: 'HAPPINESS_FLAT', value: 14 },
+      { kind: 'WELFARE_PER_100K', value: -200 },
     ],
   },
   LEI_CINTURA: {
@@ -650,8 +831,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Fiscais de saúde percorrem as fábricas medindo a cintura dos trabalhadores: corpos em forma rendem mais, mas ninguém suporta a fita métrica.',
     effects: [
-      { text: '+12% de produção das cidades', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'PRODUCTION_PCT', value: 12 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   LEI_SECA: {
@@ -663,8 +844,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Proíbe toda bebida alcoólica no território: as fábricas ganham operários sóbrios, mas o povo se revolta e o contrabando explode.',
     effects: [
-      { text: '+10% de produção das cidades', good: true },
-      { text: '−15 de felicidade', good: false },
+      { kind: 'PRODUCTION_PCT', value: 10 },
+      { kind: 'HAPPINESS_FLAT', value: -15 },
     ],
   },
   TRABALHO_COMPULSORIO: {
@@ -676,8 +857,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Convoca todo cidadão apto para turnos obrigatórios nas fábricas; a produção dispara, o ânimo desaba.',
     effects: [
-      { text: '+25% de produção das cidades', good: true },
-      { text: '−12 de felicidade', good: false },
+      { kind: 'PRODUCTION_PCT', value: 25 },
+      { kind: 'HAPPINESS_FLAT', value: -12 },
     ],
   },
   JORNADA_REDUZIDA: {
@@ -689,8 +870,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Limita o expediente a poucas horas; o povo agradece o descanso, as linhas de montagem desaceleram.',
     effects: [
-      { text: '+14 de felicidade', good: true },
-      { text: '−15% de produção das cidades', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 14 },
+      { kind: 'PRODUCTION_PCT', value: -15 },
     ],
   },
   IMPOSTO_LUXO: {
@@ -702,8 +883,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Sobretaxa joias, mansões e artigos finos; o tesouro engorda e os ricos resmungam alto.',
     effects: [
-      { text: '+15% de renda de impostos', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'TAX_PCT', value: 15 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   PRIVATIZACAO: {
@@ -715,8 +896,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Vende as empresas estatais a investidores; o comércio fervilha, mas a Coroa perde suas rendas.',
     effects: [
-      { text: '+22% de renda das zonas comerciais', good: true },
-      { text: '−15% de renda de impostos', good: false },
+      { kind: 'COMMERCIAL_PCT', value: 22 },
+      { kind: 'TAX_PCT', value: -15 },
     ],
   },
   ESTATIZACAO_INDUSTRIA: {
@@ -728,8 +909,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'O Estado assume as fábricas e dita a produção; as linhas avançam, o comércio livre míngua.',
     effects: [
-      { text: '+25% de produção das cidades', good: true },
-      { text: '−20% de renda das zonas comerciais', good: false },
+      { kind: 'PRODUCTION_PCT', value: 25 },
+      { kind: 'COMMERCIAL_PCT', value: -20 },
     ],
   },
   RECRUTAMENTO_MASSA: {
@@ -741,8 +922,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Convoca levas inteiras para a caserna; o exército incha, mas as famílias ficam sem seus filhos.',
     effects: [
-      { text: '+30% de manpower gerado pelas cidades', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'MANPOWER_PCT', value: 30 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   PESQUISA_MILITAR: {
@@ -754,8 +935,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Direciona os laboratórios para fins de guerra; a ciência avança, as artes ficam ao relento.',
     effects: [
-      { text: '+20% de pesquisa por turno', good: true },
-      { text: '−15% de cultura por turno', good: false },
+      { kind: 'RESEARCH_PCT', value: 20 },
+      { kind: 'CULTURE_PCT', value: -15 },
     ],
   },
   AUSTERIDADE: {
@@ -767,8 +948,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Corta gastos públicos até o osso; o tesouro respira, mas faltam serviços ao povo.',
     effects: [
-      { text: '−30% de manutenção das construções', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'CONSTRUCTION_UPKEEP_PCT', value: -30 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   MONOPOLIO_ESTATAL: {
@@ -780,8 +961,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'O Estado monopoliza setores inteiros; os cofres recebem um dízimo fixo, mas a concorrência e a eficiência somem.',
     effects: [
-      { text: '+1.500 de dinheiro por turno', good: true },
-      { text: '−15% de produção das cidades', good: false },
+      { kind: 'MONEY_FLAT', value: 1500 },
+      { kind: 'PRODUCTION_PCT', value: -15 },
     ],
   },
   RESERVAS_ESTRATEGICAS: {
@@ -793,8 +974,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Manda estocar todo recurso possível; os armazéns incham, e mantê-los custa caro.',
     effects: [
-      { text: '+40% na capacidade de estoque das cidades', good: true },
-      { text: '−800 de dinheiro por turno', good: false },
+      { kind: 'STORAGE_PCT', value: 40 },
+      { kind: 'MONEY_FLAT', value: -800 },
     ],
   },
   COLONIZACAO_ACELERADA: {
@@ -806,8 +987,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Subsidia quem parte para fundar novas cidades; o território cresce, mas a conta recai sobre o tesouro.',
     effects: [
-      { text: '−30% no custo de colonos', good: true },
-      { text: '−10% de renda de impostos', good: false },
+      { kind: 'COLONO_PCT', value: -30 },
+      { kind: 'TAX_PCT', value: -10 },
     ],
   },
   GUARDA_FRONTEIRA: {
@@ -819,8 +1000,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Fecha e fortifica as fronteiras; as cidades ficam seguras, e o comércio que cruzava o limite seca.',
     effects: [
-      { text: '+20% de força de defesa das cidades', good: true },
-      { text: '−15% de renda das zonas comerciais', good: false },
+      { kind: 'DEFENSE_PCT', value: 20 },
+      { kind: 'COMMERCIAL_PCT', value: -15 },
     ],
   },
   DOUTRINACAO_ESCOLAR: {
@@ -832,8 +1013,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'As escolas passam a ensinar lealdade e civismo acima de tudo; o povo fica devoto, a ciência estagna.',
     effects: [
-      { text: '+12 de felicidade', good: true },
-      { text: '−15% de pesquisa por turno', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 12 },
+      { kind: 'RESEARCH_PCT', value: -15 },
     ],
   },
   IMIGRACAO_QUALIFICADA: {
@@ -845,8 +1026,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Abre as portas a sábios e engenheiros estrangeiros; o saber floresce, e os nativos torcem o nariz.',
     effects: [
-      { text: '+18% de pesquisa por turno', good: true },
-      { text: '−8 de felicidade', good: false },
+      { kind: 'RESEARCH_PCT', value: 18 },
+      { kind: 'HAPPINESS_FLAT', value: -8 },
     ],
   },
   SALARIO_MINIMO: {
@@ -858,8 +1039,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Fixa um piso salarial alto; os trabalhadores prosperam, e as fábricas sentem o peso na folha.',
     effects: [
-      { text: '+12 de felicidade', good: true },
-      { text: '−18% de renda das zonas de fábrica', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 12 },
+      { kind: 'FACTORY_PCT', value: -18 },
     ],
   },
   MECANIZACAO_AGRICOLA: {
@@ -871,8 +1052,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Tratores e máquinas tomam conta do campo; a colheita explode, e os lavradores ficam sem trabalho.',
     effects: [
-      { text: '+25% de produção de comida', good: true },
-      { text: '−10 de felicidade', good: false },
+      { kind: 'FOOD_PCT', value: 25 },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
     ],
   },
   TOQUE_RECOLHER: {
@@ -884,8 +1065,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Ninguém circula após o anoitecer; as ruas ficam ordeiras, mas o comércio fecha as portas cedo.',
     effects: [
-      { text: '+10 de felicidade', good: true },
-      { text: '−15% de renda das zonas comerciais', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 10 },
+      { kind: 'COMMERCIAL_PCT', value: -15 },
     ],
   },
   GRANDES_MONUMENTOS: {
@@ -897,8 +1078,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Obriga a erguer obeliscos e estátuas colossais; o orgulho nacional sobe, e a manutenção devora o tesouro.',
     effects: [
-      { text: '+25% de cultura por turno', good: true },
-      { text: '−1.000 de dinheiro por turno', good: false },
+      { kind: 'CULTURE_PCT', value: 25 },
+      { kind: 'MONEY_FLAT', value: -1000 },
     ],
   },
   PASSEIO_CANINO: {
@@ -910,8 +1091,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Todo cão deve passear três vezes ao dia, sob multa; o povo se exercita junto, mas perde horas de trabalho na coleira.',
     effects: [
-      { text: '+8 de felicidade', good: true },
-      { text: '−10% de produção das cidades', good: false },
+      { kind: 'HAPPINESS_FLAT', value: 8 },
+      { kind: 'PRODUCTION_PCT', value: -10 },
     ],
   },
   NACIONALIZACAO_RECURSOS: {
@@ -923,8 +1104,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'O Estado toma para si todas as jazidas; a extração dispara, mas o comércio privado de minérios acaba.',
     effects: [
-      { text: '+30% na coleta de recursos das minas', good: true },
-      { text: '−15% de renda das zonas comerciais', good: false },
+      { kind: 'MINE_PCT', value: 30 },
+      { kind: 'COMMERCIAL_PCT', value: -15 },
     ],
   },
 
@@ -937,7 +1118,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🗄️',
     flavor:
       'Torna secretos os gastos públicos: sem fiscalização, boa parte da verba some entre gabinetes.',
-    effects: [{ text: '−13% de renda de impostos', good: false }],
+    effects: [{ kind: 'TAX_PCT', value: -13 }],
   },
   ISOLAMENTO: {
     id: 'ISOLAMENTO',
@@ -947,7 +1128,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🚧',
     flavor:
       'Decreta o fechamento do país ao comércio e à diplomacia estrangeira.',
-    effects: [{ text: '−17% de renda das zonas comerciais', good: false }],
+    effects: [{ kind: 'COMMERCIAL_PCT', value: -17 }],
   },
   RACIONAMENTO_ENERGIA: {
     id: 'RACIONAMENTO_ENERGIA',
@@ -957,7 +1138,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '⚡',
     flavor:
       'O governo limita por decreto a geração das usinas; fábricas e cidades funcionam pela metade.',
-    effects: [{ text: '−26% de energia gerada pelas usinas', good: false }],
+    effects: [{ kind: 'ENERGY_PCT', value: -26 }],
   },
   CONFISCO_BENS: {
     id: 'CONFISCO_BENS',
@@ -967,7 +1148,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🚔',
     flavor:
       'Autoriza o Estado a tomar propriedades e poupanças dos cidadãos — a população reage com fúria.',
-    effects: [{ text: '−22 de felicidade', good: false }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: -22 }],
   },
   LICENCIAMENTO: {
     id: 'LICENCIAMENTO',
@@ -977,9 +1158,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📋',
     flavor:
       'Exige licença e vistoria para cada obra; cada carimbo abre espaço para mais uma propina.',
-    effects: [
-      { text: '+22% no custo em dinheiro das construções', good: false },
-    ],
+    effects: [{ kind: 'CONSTRUCTION_MONEY_PCT', value: 22 }],
   },
   EMISSAO_MOEDA: {
     id: 'EMISSAO_MOEDA',
@@ -990,8 +1169,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Libera a impressão de dinheiro sem lastro nem limite — o resultado é hiperinflação.',
     effects: [
-      { text: '−22% de renda de impostos', good: false },
-      { text: '−17% de renda das zonas comerciais', good: false },
+      { kind: 'TAX_PCT', value: -22 },
+      { kind: 'COMMERCIAL_PCT', value: -17 },
     ],
   },
   CONTROLE_UNIVERSIDADES: {
@@ -1002,7 +1181,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '📕',
     flavor:
       'Submete as universidades à vigilância do regime; os melhores cérebros emigram em massa.',
-    effects: [{ text: '−19% de pesquisa por turno', good: false }],
+    effects: [{ kind: 'RESEARCH_PCT', value: -19 }],
   },
   INDICACAO_POLITICA: {
     id: 'INDICACAO_POLITICA',
@@ -1012,9 +1191,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '👔',
     flavor:
       'Os postos de comando passam a ser indicação política, não mérito — generais despreparados.',
-    effects: [
-      { text: 'Comandantes nascem com −13 de experiência', good: false },
-    ],
+    effects: [{ kind: 'COMMANDER_XP_FLAT', value: -13 }],
   },
   SALMAO_SUSPEITO: {
     id: 'SALMAO_SUSPEITO',
@@ -1025,8 +1202,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Pune quem for flagrado "manuseando peixe em circunstâncias suspeitas" — a polícia e os tribunais se afogam em casos absurdos.',
     effects: [
-      { text: '−9% de renda das zonas comerciais', good: false },
-      { text: '−5 de felicidade', good: false },
+      { kind: 'COMMERCIAL_PCT', value: -9 },
+      { kind: 'HAPPINESS_FLAT', value: -5 },
     ],
   },
   PROIBIDO_MORRER: {
@@ -1038,8 +1215,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Proíbe os cidadãos de morrer enquanto não houver vaga no cemitério; o caos cartorial confunde e revolta a população.',
     effects: [
-      { text: '−10% de renda de impostos', good: false },
-      { text: '−9 de felicidade', good: false },
+      { kind: 'TAX_PCT', value: -10 },
+      { kind: 'HAPPINESS_FLAT', value: -9 },
     ],
   },
   CONFISCO_COLHEITAS: {
@@ -1050,7 +1227,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🧺',
     flavor:
       'O Estado toma a maior parte da colheita dos campos; os lavradores plantam cada vez menos.',
-    effects: [{ text: '−16% de produção de comida', good: false }],
+    effects: [{ kind: 'FOOD_PCT', value: -16 }],
   },
   TABELAMENTO_PRECOS: {
     id: 'TABELAMENTO_PRECOS',
@@ -1060,7 +1237,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🔖',
     flavor:
       'Congela à força o preço de tudo; os mercadores fecham as portas em vez de vender no prejuízo.',
-    effects: [{ text: '−16% de renda das zonas comerciais', good: false }],
+    effects: [{ kind: 'COMMERCIAL_PCT', value: -16 }],
   },
   EXPROPRIACAO_FABRICAS: {
     id: 'EXPROPRIACAO_FABRICAS',
@@ -1070,7 +1247,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🏚️',
     flavor:
       'Confisca as fábricas sem indenizar ninguém; abandonadas pelos donos, elas definham.',
-    effects: [{ text: '−18% de renda das zonas de fábrica', good: false }],
+    effects: [{ kind: 'FACTORY_PCT', value: -18 }],
   },
   IMPOSTO_EXTORSIVO: {
     id: 'IMPOSTO_EXTORSIVO',
@@ -1080,7 +1257,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '💢',
     flavor:
       'Cria taxas sobre cada gesto da vida cotidiana; o povo se sente espremido até o último tostão.',
-    effects: [{ text: '−12 de felicidade', good: false }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: -12 }],
   },
   PERSEGUICAO_POLITICA: {
     id: 'PERSEGUICAO_POLITICA',
@@ -1090,7 +1267,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '⛓️',
     flavor:
       'Manda prender quem ousa discordar do governo; o medo se espalha de porta em porta.',
-    effects: [{ text: '−15 de felicidade', good: false }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: -15 }],
   },
   FECHAMENTO_ESCOLAS: {
     id: 'FECHAMENTO_ESCOLAS',
@@ -1100,7 +1277,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🚪',
     flavor:
       'Fecha escolas e laboratórios para "cortar gastos"; uma geração inteira fica sem instrução.',
-    effects: [{ text: '−18% de pesquisa por turno', good: false }],
+    effects: [{ kind: 'RESEARCH_PCT', value: -18 }],
   },
   PROIBICAO_ARTES: {
     id: 'PROIBICAO_ARTES',
@@ -1110,7 +1287,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🖼️',
     flavor:
       'Declara a arte um luxo subversivo e a bane das ruas; teatros e ateliês fecham as portas.',
-    effects: [{ text: '−22% de cultura por turno', good: false }],
+    effects: [{ kind: 'CULTURE_PCT', value: -22 }],
   },
   DESMONTE_INDUSTRIAL: {
     id: 'DESMONTE_INDUSTRIAL',
@@ -1120,7 +1297,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '⚙️',
     flavor:
       'Sucateia o parque industrial em nome de uma economia "mais simples"; as cidades produzem cada vez menos.',
-    effects: [{ text: '−22% de produção das cidades', good: false }],
+    effects: [{ kind: 'PRODUCTION_PCT', value: -22 }],
   },
   SUCATEAMENTO_MILITAR: {
     id: 'SUCATEAMENTO_MILITAR',
@@ -1130,7 +1307,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🗑️',
     flavor:
       'Vende armas e equipamentos para fazer caixa; as tropas vão à luta mal-armadas.',
-    effects: [{ text: '−20% de força das tropas em ataques', good: false }],
+    effects: [{ kind: 'ATTACK_PCT', value: -20 }],
   },
   CORTES_DEFESA: {
     id: 'CORTES_DEFESA',
@@ -1140,7 +1317,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🪙',
     flavor:
       'Corta a verba das fortificações e guarnições; as cidades ficam vulneráveis a qualquer cerco.',
-    effects: [{ text: '−20% de força de defesa das cidades', good: false }],
+    effects: [{ kind: 'DEFENSE_PCT', value: -20 }],
   },
   MORATORIA_DIVIDA: {
     id: 'MORATORIA_DIVIDA',
@@ -1150,7 +1327,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '💳',
     flavor:
       'O Estado dá calote nos próprios credores; o crédito seca e os mercados perdem a confiança.',
-    effects: [{ text: '−16% de renda das zonas comerciais', good: false }],
+    effects: [{ kind: 'COMMERCIAL_PCT', value: -16 }],
   },
   ANISTIA_FISCAL: {
     id: 'ANISTIA_FISCAL',
@@ -1160,7 +1337,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🤐',
     flavor:
       'Perdoa as dívidas dos mais poderosos; o tesouro abre mão de uma fortuna em tributos.',
-    effects: [{ text: '−13% de renda de impostos', good: false }],
+    effects: [{ kind: 'TAX_PCT', value: -13 }],
   },
   ISENCAO_SERVICO: {
     id: 'ISENCAO_SERVICO',
@@ -1170,9 +1347,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🛌',
     flavor:
       'Permite que quase todos escapem do alistamento; o exército fica sem reservas para mobilizar.',
-    effects: [
-      { text: '−18% de manpower gerado pelas cidades', good: false },
-    ],
+    effects: [{ kind: 'MANPOWER_PCT', value: -18 }],
   },
   INSPECOES_PERMANENTES: {
     id: 'INSPECOES_PERMANENTES',
@@ -1182,7 +1357,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🔍',
     flavor:
       'Exige vistorias constantes e laudos infindáveis; manter cada edifício vira um sorvedouro de dinheiro.',
-    effects: [{ text: '+18% de manutenção das construções', good: false }],
+    effects: [{ kind: 'CONSTRUCTION_UPKEEP_PCT', value: 18 }],
   },
   PEDAGIOS_INTERNOS: {
     id: 'PEDAGIOS_INTERNOS',
@@ -1192,9 +1367,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🚏',
     flavor:
       'Crava cabines de pedágio em cada estrada; até as colunas militares emperram nas filas.',
-    effects: [
-      { text: '−1 de movimento por turno para as tropas', good: false },
-    ],
+    effects: [{ kind: 'MOVEMENT_FLAT', value: -1 }],
   },
   CONGELAMENTO_URBANO: {
     id: 'CONGELAMENTO_URBANO',
@@ -1204,7 +1377,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🧊',
     flavor:
       'Proíbe novas construções residenciais; as cidades sufocam, sem para onde crescer.',
-    effects: [{ text: '−12% no teto de população das cidades', good: false }],
+    effects: [{ kind: 'POP_CAP_PCT', value: -12 }],
   },
   CONTROLE_NATALIDADE: {
     id: 'CONTROLE_NATALIDADE',
@@ -1214,7 +1387,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🚼',
     flavor:
       'Impõe limites rígidos ao número de filhos; os berços vão ficando vazios.',
-    effects: [{ text: '−16% no crescimento populacional', good: false }],
+    effects: [{ kind: 'POP_GROWTH_PCT', value: -16 }],
   },
   RESTRICAO_MINERACAO: {
     id: 'RESTRICAO_MINERACAO',
@@ -1224,7 +1397,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '⛔',
     flavor:
       'Embarga a maior parte das jazidas por decreto; o subsolo rende cada vez menos.',
-    effects: [{ text: '−18% na coleta de recursos das minas', good: false }],
+    effects: [{ kind: 'MINE_PCT', value: -18 }],
   },
   ANIVERSARIO_OBRIGATORIO: {
     id: 'ANIVERSARIO_OBRIGATORIO',
@@ -1234,7 +1407,7 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     icon: '🎂',
     flavor:
       'Esquecer o aniversário do cônjuge passa a ser crime; os cidadãos vivem aterrorizados diante do calendário.',
-    effects: [{ text: '−12 de felicidade', good: false }],
+    effects: [{ kind: 'HAPPINESS_FLAT', value: -12 }],
   },
   IMPOSTO_JANELAS: {
     id: 'IMPOSTO_JANELAS',
@@ -1245,8 +1418,8 @@ export const LAW_CARDS: Record<LawId, LawCard> = {
     flavor:
       'Cada janela de cada casa é taxada; o povo mura as paredes e passa a viver e a trabalhar no escuro.',
     effects: [
-      { text: '−10 de felicidade', good: false },
-      { text: '−8% de produção das cidades', good: false },
+      { kind: 'HAPPINESS_FLAT', value: -10 },
+      { kind: 'PRODUCTION_PCT', value: -8 },
     ],
   },
 };
@@ -1262,6 +1435,27 @@ export function lawsOfQuality(quality: LawQuality): LawCard[] {
 /** `true` se `id` é uma lei válida do catálogo. */
 export function isLawId(id: string): id is LawId {
   return id in LAW_CARDS;
+}
+
+// ===== Modificadores agregados =====
+
+/** Soma dos efeitos das leis ativas de uma facção, por tipo de efeito. */
+export type LawModifiers = Record<LawEffectKind, number>;
+
+/** Um `LawModifiers` zerado. */
+export function emptyLawModifiers(): LawModifiers {
+  const m = {} as LawModifiers;
+  for (const k of LAW_EFFECT_KIND_LIST) m[k] = 0;
+  return m;
+}
+
+/** Soma os efeitos de um conjunto de cards num `LawModifiers`. */
+export function aggregateLawEffects(cards: LawCard[]): LawModifiers {
+  const m = emptyLawModifiers();
+  for (const c of cards) {
+    for (const e of c.effects) m[e.kind] += e.value;
+  }
+  return m;
 }
 
 // ===== Constantes do sistema =====
@@ -1299,6 +1493,72 @@ export function nextSlotExpansion(
   if (currentTier >= MAX_SLOT_TIER) return null;
   const tier = currentTier + 1;
   return { tier, cost: SLOT_EXPANSION_COST[tier] };
+}
+
+/** Custo de um pacote premium — sorteia uma carta que a facção ainda não tem. */
+export const PREMIUM_PACK_COST = 800;
+
+/** Cultura devolvida ao vender uma carta do inventário (¼ do pacote comum). */
+export const LAW_REFUND = Math.round(PACK_COST / 4);
+
+/** As leis ativas só podem ser trocadas em turnos múltiplos deste intervalo. */
+export const LAW_SWAP_INTERVAL = 20;
+
+/** `true` se o turno atual permite trocar leis (múltiplo de `LAW_SWAP_INTERVAL`). */
+export function canSwapLaws(turn: number): boolean {
+  return turn % LAW_SWAP_INTERVAL === 0;
+}
+
+/** Próximo turno em que será possível trocar leis (ou o atual, se já dá). */
+export function nextSwapTurn(turn: number): number {
+  return canSwapLaws(turn)
+    ? turn
+    : (Math.floor(turn / LAW_SWAP_INTERVAL) + 1) * LAW_SWAP_INTERVAL;
+}
+
+/**
+ * A **lei-padrão** (neutra) de cada nação fixa — ocupa o espaço neutro nº 0,
+ * travado, e dá identidade a cada facção. A nação personalizada escolhe a sua
+ * na criação (ver `factionDefaultLaw`).
+ */
+export const DEFAULT_LAW_BY_NATION: Record<string, LawId> = {
+  BRA: 'MECANIZACAO_AGRICOLA',
+  URU: 'PRIVATIZACAO',
+  GBR: 'PROTECIONISMO',
+  CHN: 'PLANO_QUINQUENAL',
+  JPN: 'LEI_CINTURA',
+  USS: 'ESTATIZACAO_INDUSTRIA',
+  FRA: 'ESTADO_LAICO',
+  IBR: 'FRONTEIRAS_ABERTAS',
+  GER: 'SEGURIDADE_SOCIAL',
+  ZAF: 'IMIGRACAO_QUALIFICADA',
+  EGY: 'LEI_MARCIAL',
+  PER: 'GUARDA_FRONTEIRA',
+  MKD: 'RECRUTAMENTO_MASSA',
+};
+
+/** Lei-padrão usada quando uma facção não tem uma definida. */
+const FALLBACK_DEFAULT_LAW: LawId = 'FRONTEIRAS_ABERTAS';
+
+/**
+ * A lei-padrão de uma facção: a nação fixa usa `DEFAULT_LAW_BY_NATION`; a nação
+ * personalizada usa a lei neutra escolhida na criação (`saves.custom_default_law`).
+ */
+export async function factionDefaultLaw(
+  saveId: number,
+  ownerCode: string,
+): Promise<LawId> {
+  if (ownerCode !== CUSTOM_NATION_CODE) {
+    return DEFAULT_LAW_BY_NATION[ownerCode] ?? FALLBACK_DEFAULT_LAW;
+  }
+  const db = await getDb();
+  const rows = await db.select<{ custom_default_law: string | null }[]>(
+    'SELECT custom_default_law FROM saves WHERE id = ?',
+    [saveId],
+  );
+  const id = rows[0]?.custom_default_law;
+  if (id && isLawId(id) && LAW_CARDS[id].quality === 'NEUTRA') return id;
+  return FALLBACK_DEFAULT_LAW;
 }
 
 // ===== Estado de leis de uma facção =====
@@ -1374,10 +1634,11 @@ async function addToInventory(
  * Garante que uma facção tem as suas leis em ordem:
  *
  * 1. apaga cartas de catálogos antigos (ids que não existem mais);
- * 2. preenche **todo espaço de lei vazio** (até `slotTier`) com uma carta
- *    sorteada da qualidade certa — é o que semeia o conjunto inicial e o que
- *    conserta saves cujas cartas ficaram inválidas depois de mudanças no
- *    catálogo.
+ * 2. o **espaço neutro nº 0** é sempre a **lei-padrão da facção** (travada);
+ * 3. preenche os demais espaços vazios (até `slotTier`) com uma carta sorteada.
+ *
+ * É o que semeia o conjunto inicial e o que conserta saves cujas cartas
+ * ficaram inválidas depois de mudanças no catálogo.
  */
 export async function ensureFactionLaws(
   saveId: number,
@@ -1399,40 +1660,72 @@ export async function ensureFactionLaws(
     [saveId, ownerCode, ...validIds],
   );
 
-  // 2. Descobre quais espaços (qualidade × índice) ficaram vazios.
   const fac = await db.select<{ law_slot_tier: number }[]>(
     'SELECT law_slot_tier FROM factions WHERE save_id = ? AND code = ?',
     [saveId, ownerCode],
   );
   const slotTier = fac[0]?.law_slot_tier ?? MIN_SLOT_TIER;
+  const defaultLaw = await factionDefaultLaw(saveId, ownerCode);
 
-  const existing = await db.select<{ quality: string; slot_index: number }[]>(
-    'SELECT quality, slot_index FROM active_laws WHERE save_id = ? AND owner_code = ?',
+  const existing = await db.select<
+    { quality: string; slot_index: number; law_id: string }[]
+  >(
+    'SELECT quality, slot_index, law_id FROM active_laws WHERE save_id = ? AND owner_code = ?',
     [saveId, ownerCode],
   );
-  const filled = new Set(existing.map((r) => `${r.quality}:${r.slot_index}`));
+  const bySlot = new Map(
+    existing.map((r) => [`${r.quality}:${r.slot_index}`, r.law_id]),
+  );
 
-  const missing: { quality: LawQuality; slotIndex: number }[] = [];
+  // Monta as operações: o espaço neutro 0 é sempre a lei-padrão; os demais
+  // espaços vazios recebem uma carta sorteada da qualidade.
+  interface SlotOp {
+    quality: LawQuality;
+    slotIndex: number;
+    lawId: LawId;
+    isUpdate: boolean;
+  }
+  const ops: SlotOp[] = [];
   for (const q of LAW_QUALITY_LIST) {
     for (let i = 0; i < slotTier; i++) {
-      if (!filled.has(`${q.id}:${i}`)) {
-        missing.push({ quality: q.id, slotIndex: i });
+      const current = bySlot.get(`${q.id}:${i}`);
+      if (q.id === 'NEUTRA' && i === 0) {
+        if (current === defaultLaw) continue;
+        ops.push({
+          quality: 'NEUTRA',
+          slotIndex: 0,
+          lawId: defaultLaw,
+          isUpdate: current !== undefined,
+        });
+      } else if (current === undefined) {
+        ops.push({
+          quality: q.id,
+          slotIndex: i,
+          lawId: randomLawOfQuality(q.id),
+          isUpdate: false,
+        });
       }
     }
   }
-  if (missing.length === 0) return;
+  if (ops.length === 0) return;
 
-  // 3. Preenche cada espaço vazio com uma carta sorteada.
   await db.execute('BEGIN');
   try {
-    for (const m of missing) {
-      const lawId = randomLawOfQuality(m.quality);
-      await addToInventory(db, saveId, ownerCode, lawId);
-      await db.execute(
-        `INSERT INTO active_laws (save_id, owner_code, quality, slot_index, law_id)
-         VALUES (?, ?, ?, ?, ?)`,
-        [saveId, ownerCode, m.quality, m.slotIndex, lawId],
-      );
+    for (const op of ops) {
+      await addToInventory(db, saveId, ownerCode, op.lawId);
+      if (op.isUpdate) {
+        await db.execute(
+          `UPDATE active_laws SET law_id = ?
+            WHERE save_id = ? AND owner_code = ? AND quality = ? AND slot_index = ?`,
+          [op.lawId, saveId, ownerCode, op.quality, op.slotIndex],
+        );
+      } else {
+        await db.execute(
+          `INSERT INTO active_laws (save_id, owner_code, quality, slot_index, law_id)
+           VALUES (?, ?, ?, ?, ?)`,
+          [saveId, ownerCode, op.quality, op.slotIndex, op.lawId],
+        );
+      }
     }
     await db.execute('COMMIT');
   } catch (e) {
@@ -1481,6 +1774,25 @@ export async function loadFactionLaws(
       .filter((r) => isLawId(r.law_id))
       .map((r) => ({ lawId: r.law_id as LawId, count: r.count })),
   };
+}
+
+/**
+ * Carrega os **modificadores agregados** das leis ativas de uma facção — o que
+ * o `advanceTurn` aplica na economia. Leitura pura: não semeia leis.
+ */
+export async function loadLawModifiers(
+  saveId: number,
+  ownerCode: string,
+): Promise<LawModifiers> {
+  const db = await getDb();
+  const rows = await db.select<{ law_id: string }[]>(
+    'SELECT law_id FROM active_laws WHERE save_id = ? AND owner_code = ?',
+    [saveId, ownerCode],
+  );
+  const cards = rows
+    .filter((r) => isLawId(r.law_id))
+    .map((r) => LAW_CARDS[r.law_id as LawId]);
+  return aggregateLawEffects(cards);
 }
 
 /**
@@ -1534,6 +1846,21 @@ export async function setActiveLaw(
 ): Promise<void> {
   const db = await getDb();
   if (!isLawId(lawId)) throw new Error('Lei desconhecida.');
+  // O espaço neutro nº 0 é a lei-padrão da facção — fixa, nunca trocável.
+  if (quality === 'NEUTRA' && slotIndex === 0) {
+    throw new Error('A lei da nação é fixa e não pode ser trocada.');
+  }
+  // As leis só podem ser trocadas nas janelas (turnos múltiplos do intervalo).
+  const turnRows = await db.select<{ turn: number }[]>(
+    'SELECT turn FROM saves WHERE id = ?',
+    [saveId],
+  );
+  const turn = turnRows[0]?.turn ?? 1;
+  if (!canSwapLaws(turn)) {
+    throw new Error(
+      `As leis só mudam a cada ${LAW_SWAP_INTERVAL} turnos — próxima janela no turno ${nextSwapTurn(turn)}.`,
+    );
+  }
   const card = LAW_CARDS[lawId];
   if (card.quality !== quality) {
     throw new Error(
@@ -1627,4 +1954,102 @@ export async function expandLawSlots(
     throw e;
   }
   return { tier: next.tier, drawn };
+}
+
+/**
+ * Vende uma cópia de uma carta do inventário por `LAW_REFUND` de cultura. Não
+ * dá para vender uma carta que está em uso por uma lei ativa (o inventário
+ * precisa manter, no mínimo, uma cópia de cada lei ativa).
+ */
+export async function sellLawCard(
+  saveId: number,
+  ownerCode: string,
+  lawId: string,
+): Promise<void> {
+  const db = await getDb();
+  if (!isLawId(lawId)) throw new Error('Lei desconhecida.');
+
+  const inv = await db.select<{ count: number }[]>(
+    'SELECT count FROM law_inventory WHERE save_id = ? AND owner_code = ? AND law_id = ?',
+    [saveId, ownerCode, lawId],
+  );
+  const count = inv[0]?.count ?? 0;
+  if (count < 1) throw new Error('Você não tem essa carta no inventário.');
+
+  const active = await db.select<{ n: number }[]>(
+    'SELECT COUNT(*) AS n FROM active_laws WHERE save_id = ? AND owner_code = ? AND law_id = ?',
+    [saveId, ownerCode, lawId],
+  );
+  if (count <= (active[0]?.n ?? 0)) {
+    throw new Error('Essa carta está em uso por uma lei ativa.');
+  }
+
+  await db.execute('BEGIN');
+  try {
+    await db.execute(
+      'UPDATE factions SET culture = culture + ? WHERE save_id = ? AND code = ?',
+      [LAW_REFUND, saveId, ownerCode],
+    );
+    if (count - 1 <= 0) {
+      await db.execute(
+        'DELETE FROM law_inventory WHERE save_id = ? AND owner_code = ? AND law_id = ?',
+        [saveId, ownerCode, lawId],
+      );
+    } else {
+      await db.execute(
+        'UPDATE law_inventory SET count = count - 1 WHERE save_id = ? AND owner_code = ? AND law_id = ?',
+        [saveId, ownerCode, lawId],
+      );
+    }
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+}
+
+/**
+ * Compra e abre um **pacote premium** (`PREMIUM_PACK_COST` de cultura): sorteia
+ * uma carta que a facção **ainda não tem** — nunca repete. Devolve a carta.
+ */
+export async function openPremiumPack(
+  saveId: number,
+  ownerCode: string,
+): Promise<LawId> {
+  const db = await getDb();
+  const rows = await db.select<{ culture: number }[]>(
+    'SELECT culture FROM factions WHERE save_id = ? AND code = ?',
+    [saveId, ownerCode],
+  );
+  if (!rows[0]) throw new Error('Facção não encontrada.');
+  if (rows[0].culture < PREMIUM_PACK_COST) {
+    throw new Error(
+      `Cultura insuficiente — o pacote premium custa ${PREMIUM_PACK_COST}.`,
+    );
+  }
+
+  const owned = await db.select<{ law_id: string }[]>(
+    'SELECT law_id FROM law_inventory WHERE save_id = ? AND owner_code = ? AND count > 0',
+    [saveId, ownerCode],
+  );
+  const ownedSet = new Set(owned.map((r) => r.law_id));
+  const pool = LAW_LIST.filter((c) => !ownedSet.has(c.id));
+  if (pool.length === 0) {
+    throw new Error('Você já possui todas as leis do catálogo.');
+  }
+  const lawId = pool[Math.floor(Math.random() * pool.length)].id;
+
+  await db.execute('BEGIN');
+  try {
+    await db.execute(
+      'UPDATE factions SET culture = culture - ? WHERE save_id = ? AND code = ?',
+      [PREMIUM_PACK_COST, saveId, ownerCode],
+    );
+    await addToInventory(db, saveId, ownerCode, lawId);
+    await db.execute('COMMIT');
+  } catch (e) {
+    await db.execute('ROLLBACK');
+    throw e;
+  }
+  return lawId;
 }
