@@ -1429,15 +1429,25 @@ sorteio e validações. A UI nunca envia custo, carta sorteada nem resultado —
 só dispara a ação. O sorteio (`Math.random`) acontece sempre na lógica de
 jogo.
 
+### Catálogo
+
+O catálogo (`LAW_CARDS`) tem **90 leis** — 30 boas, 30 neutras e 30 ruins.
+Cada card é uma **lei/decreto** que um governo aprova; o efeito é a
+consequência da lei (a carta nunca é uma consequência ou um estado de coisas —
+a "Lei do Licenciamento Obrigatório" é a lei, a *burocracia* é o efeito).
+Onze são **"leis engraçadas"** inspiradas em leis reais, mas o texto de cada
+card é sempre **deste mundo** — nenhuma referência histórica ao mundo real. As
+leis ruins são calibradas um pouco mais leves que as boas, já que o sistema
+**obriga** a manter o mesmo número de leis ruins e boas.
+
 ### Planejado
 
-- O **catálogo de leis** atual é um conjunto-semente de exemplo (12 cartas) e
-  os efeitos são, por enquanto, apenas **descritivos** — o sistema numérico
-  que aplica os modificadores na economia/combate ainda será desenhado, junto
-  da lista definitiva de leis.
+- Os efeitos das leis são, por enquanto, apenas **descritivos** (texto no
+  card) — o sistema numérico que aplica os modificadores na economia/combate
+  ainda será integrado.
 - **Leis-padrão da ideologia** — leis inerentes ao direcionamento político da
   facção, que certos cards poderiam **amenizar** (ex.: uma nação comunista com
-  um card de "zona de livre comércio").
+  a "Lei das Zonas de Livre Comércio").
 - As **facções da IA** usando leis.
 
 ---
